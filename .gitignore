@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Poświadczenia i konfiguracja lokalna
+.env
+.env.*
+
+# Wyniki diagnostyki endpointu zawierają adres routera.
+# Ukośnik na początku ogranicza regułę do katalogu głównego; bez niego
+# pasowałaby też do src/server/llm/diagnostics.
+/diagnostics/
