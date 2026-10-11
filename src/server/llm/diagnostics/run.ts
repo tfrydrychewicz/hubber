@@ -3,7 +3,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { VERSION as SDK_VERSION } from "@anthropic-ai/sdk/version";
 import { CHECK_FUNCTIONS, type CheckContext } from "./checks.ts";
 import { classifyError } from "./classify.ts";
-import { CHECKS, type CheckId, type CheckResult, type DiagnosticsReport, type ReportMeta } from "./types.ts";
+import {
+  CHECKS,
+  type CheckId,
+  type CheckResult,
+  type DiagnosticsReport,
+  type Redact,
+  type ReportMeta,
+} from "./types.ts";
 
 // Thinking counts toward max_tokens, so even one-word answers need headroom.
 const DEFAULT_MAX_TOKENS = 16_000;
@@ -18,6 +25,11 @@ export interface RunOptions {
   maxTokens?: number;
   nonce?: string;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Takes the credentials of the run out of a text. Applied to whatever the endpoint said before
+   * a check or an error shortens it; without it the texts are taken as they are.
+   */
+  redact?: Redact;
   onCheckStart?: (check: CheckDefinition) => void;
   onCheckDone?: (result: CheckResult) => void;
 }
@@ -48,6 +60,7 @@ export async function runDiagnostics(options: RunOptions): Promise<DiagnosticsRe
     nonce: options.nonce ?? randomBytes(4).toString("hex"),
     availableModels: [],
     sleep: options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    redact: options.redact ?? ((text) => text),
   };
 
   const selected = CHECKS.filter(
@@ -77,7 +90,7 @@ export async function runDiagnostics(options: RunOptions): Promise<DiagnosticsRe
         const outcome = await CHECK_FUNCTIONS[check.id](ctx);
         result = { ...check, ...outcome, durationMs: Math.round(performance.now() - checkStarted) };
       } catch (err) {
-        const { status, error } = classifyError(err);
+        const { status, error } = classifyError(err, ctx.redact);
         result = {
           ...check,
           status,

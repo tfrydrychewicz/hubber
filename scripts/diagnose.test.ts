@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -15,29 +16,27 @@ import { spawnNode } from "../src/server/testing.ts";
 const SPAWN_TIMEOUT_MS = 30_000;
 
 const children: ChildProcess[] = [];
-let server: Server | undefined;
+const servers: Server[] = [];
 let workDir: string | undefined;
 
 afterEach(async () => {
   // A run that outlived its test: the test timeout ended the wait for it, not the process.
   for (const child of children.splice(0)) child.kill("SIGKILL");
-  await new Promise((resolve) => (server ? server.close(resolve) : resolve(undefined)));
-  server = undefined;
+  await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
   if (workDir) rmSync(workDir, { recursive: true, force: true });
   workDir = undefined;
 });
 
 // The script builds its own client, so it needs a real socket to talk to.
-async function serve(behavior: FakeBehavior = {}): Promise<{ url: string; endpoint: FakeEndpoint }> {
-  const endpoint = createFakeEndpoint(behavior);
-  server = createServer(async (req, res) => {
+async function listen(answer: (request: Request) => Promise<Response>): Promise<string> {
+  const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) {
       if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
     }
-    const response = await endpoint.fetch(
+    const response = await answer(
       new Request(`http://fake${req.url}`, {
         method: req.method ?? "GET",
         headers,
@@ -48,9 +47,47 @@ async function serve(behavior: FakeBehavior = {}): Promise<{ url: string; endpoi
     if (response.body) for await (const chunk of response.body) res.write(chunk);
     res.end();
   });
-  await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, endpoint };
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
+
+async function serve(behavior: FakeBehavior = {}): Promise<{ url: string; endpoint: FakeEndpoint }> {
+  const endpoint = createFakeEndpoint(behavior);
+  return { url: await listen(endpoint.fetch), endpoint };
+}
+
+/**
+ * A gateway that repeats the credential it was sent, the way some do. By default it refuses the
+ * credential and repeats it in the error, as it was sent and as a URL would hold it, after
+ * `lead` characters of other text. With `accept` it answers like a model that repeats it.
+ */
+function serveEchoing({ lead = 0, accept = false } = {}): Promise<string> {
+  return listen(async (request) => {
+    const presented = request.headers.get("authorization") ?? request.headers.get("x-api-key") ?? "";
+    if (accept) {
+      return Response.json({
+        id: "msg_echo",
+        type: "message",
+        role: "assistant",
+        model: "test-model",
+        content: [{ type: "text", text: `gotowe ${presented}` }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    }
+    const message = `${"y".repeat(lead)}Invalid credential: ${presented} (${encodeURIComponent(presented)})`;
+    return Response.json(
+      { type: "error", error: { type: "authentication_error", message } },
+      { status: 401, headers: { "request-id": "req_echo" } },
+    );
+  });
+}
+
+// Made up for each run, so that a finding can only come from this run. No fixed beginning: one
+// of the tests looks for the first characters alone.
+const plantedSecret = () => randomBytes(24).toString("hex");
 
 function tempDir(): string {
   workDir = mkdtempSync(join(tmpdir(), "hubber-diagnose-"));
@@ -67,8 +104,9 @@ interface RunResult {
 }
 
 // spawnNode() builds the environment from scratch, so the developer's own ANTHROPIC_* variables never leak in.
+// Nor does HOME: the SDK looks for credential profiles under the home directory.
 async function diagnose(args: string[], env: Record<string, string> = {}): Promise<RunResult> {
-  const script = spawnNode("scripts/diagnose.ts", { args, env: { HOME: process.env.HOME ?? "", ...env } });
+  const script = spawnNode("scripts/diagnose.ts", { args, env });
   children.push(script.child);
   const { code } = await script.exited;
   return { code, stdout: script.stdout(), stderr: script.stderr(), output: `${script.stdout()}${script.stderr()}` };
@@ -210,6 +248,366 @@ describe("scripts/diagnose.ts", { timeout: SPAWN_TIMEOUT_MS }, () => {
     expect(unknownFlag.stderr).toContain("Użycie:");
 
     expect(endpoint.requests).toHaveLength(0);
+  });
+
+  it("keeps a credential that the endpoint repeats out of what it prints and out of the report it writes", async () => {
+    const secret = plantedSecret();
+    const url = await serveEchoing();
+    const out = join(tempDir(), "report.json");
+
+    const result = await diagnose(["--model", "test-model", "--out", out], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_AUTH_TOKEN: secret,
+    });
+
+    const written = readFileSync(out, "utf8");
+    expect(result.code, result.output.replaceAll(secret, "<THE SECRET>")).toBe(1);
+    expect(result.output.includes(secret)).toBe(false);
+    expect(written.includes(secret)).toBe(false);
+    // The endpoint did repeat it: the rest of its sentence is in both places.
+    expect(result.stdout).toContain("Invalid credential: Bearer [ukryte] (Bearer%20[ukryte])");
+    expect(JSON.parse(written).checks[0].error).toMatchObject({
+      httpStatus: 401,
+      message: "Invalid credential: Bearer [ukryte] (Bearer%20[ukryte])",
+      requestId: "req_echo",
+    });
+    expect(result.stdout).toContain("Raport nie zawiera poświadczeń.");
+  });
+
+  it("keeps it out of the report it prints as JSON, also in the form a URL gives it", async () => {
+    // Every character of the first part is written differently in a URL.
+    const secret = `+/=:${plantedSecret()}`;
+    const url = await serveEchoing();
+
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--json", "--no-file"], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: secret,
+    });
+
+    expect(result.code, result.output.replaceAll(secret, "<THE SECRET>")).toBe(1);
+    expect(result.output.includes(secret)).toBe(false);
+    expect(result.output.includes(encodeURIComponent(secret))).toBe(false);
+    expect(JSON.parse(result.stdout).checks[0].detail).toBe("Invalid credential: [ukryte] ([ukryte])");
+  });
+
+  it("leaves no part of it where the diagnostics cut a long error text short", async () => {
+    const secret = plantedSecret();
+    // With this much text in front, the limit of an error text falls inside the credential.
+    const url = await serveEchoing({ lead: 560 });
+    const out = join(tempDir(), "report.json");
+
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--out", out], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_AUTH_TOKEN: secret,
+    });
+
+    const beginning = secret.slice(0, 8);
+    expect(result.code, result.output.replaceAll(beginning, "<THE SECRET>")).toBe(1);
+    expect(result.output.includes(beginning)).toBe(false);
+    expect(readFileSync(out, "utf8").includes(beginning)).toBe(false);
+    expect(result.stdout).toContain("Invalid credential: Bearer [ukryte]");
+  });
+
+  it("keeps it out of what a check says about an answer that was accepted", async () => {
+    const secret = plantedSecret();
+    const url = await serveEchoing({ accept: true });
+    const out = join(tempDir(), "report.json");
+    const env = { ANTHROPIC_BASE_URL: url, ANTHROPIC_AUTH_TOKEN: secret };
+
+    const table = await diagnose(["--model", "test-model", "--only", "message", "--out", out], env);
+    const json = await diagnose(["--model", "test-model", "--only", "message", "--json", "--no-file"], env);
+
+    expect(table.code, table.output.replaceAll(secret, "<THE SECRET>")).toBe(0);
+    expect(json.code, json.output.replaceAll(secret, "<THE SECRET>")).toBe(0);
+    for (const text of [table.output, json.output, readFileSync(out, "utf8")]) {
+      expect(text.includes(secret)).toBe(false);
+      expect(text).toContain("Model odpowiedział: „gotowe Bearer [ukryte]”.");
+    }
+  });
+
+  it("keeps out a credential that could not be sent because of a line break inside it", async () => {
+    const [first, second] = [plantedSecret(), plantedSecret()];
+    const out = join(tempDir(), "report.json");
+
+    // Nothing listens on this port, and nothing is sent: the SDK refuses the header value,
+    // and its message repeats the value.
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--out", out], {
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+      ANTHROPIC_AUTH_TOKEN: `${first}\n${second}`,
+    });
+
+    const hidden = (text: string) => text.replaceAll(first, "<THE SECRET>").replaceAll(second, "<THE SECRET>");
+    expect(result.code, hidden(result.output)).toBe(1);
+    for (const text of [result.output, readFileSync(out, "utf8")]) {
+      expect(text.includes(first)).toBe(false);
+      expect(text.includes(second)).toBe(false);
+      expect(text).toContain("Bearer [ukryte]");
+    }
+  });
+
+  it.each([
+    ["Authorization", "Bearer ", "Invalid credential: Bearer [ukryte] (Bearer%20[ukryte])"],
+    ["X-Api-Key", "", "Invalid credential: [ukryte] ([ukryte])"],
+  ])("keeps out a credential that a settings file put into the header %s itself", async (header, scheme, detail) => {
+    const secret = plantedSecret();
+    const url = await serveEchoing();
+    const settingsPath = join(tempDir(), "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: url,
+          ANTHROPIC_CUSTOM_HEADERS: `${header}: ${scheme}${secret}`,
+          ANTHROPIC_MODEL: "test-model",
+        },
+      }),
+    );
+
+    const result = await diagnose(["--claude-settings", settingsPath, "--only", "message", "--json", "--no-file"]);
+
+    expect(result.code, result.output.replaceAll(secret, "<THE SECRET>")).toBe(1);
+    expect(result.output.includes(secret)).toBe(false);
+    const report = JSON.parse(result.stdout);
+    expect(report.meta.credentialSource).toBe("custom-headers");
+    expect(report.checks[0].detail).toBe(detail);
+  });
+
+  // The limits at which the diagnostics cut a text short are far below the length of a real
+  // credential. Each of these has the cut fall inside the credential: whatever is cleaned only
+  // afterwards leaves the part before the cut.
+  it("leaves no part of a long credential where a check quotes the beginning of an answer that repeats it", async () => {
+    const secret = `${plantedSecret()}${plantedSecret()}${plantedSecret()}`;
+    const url = await serveEchoing({ accept: true });
+    const out = join(tempDir(), "report.json");
+
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--out", out], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: secret,
+    });
+
+    const beginning = secret.slice(0, 8);
+    expect(result.code, result.output.replaceAll(beginning, "<THE SECRET>")).toBe(0);
+    for (const text of [result.output, readFileSync(out, "utf8")]) {
+      expect(text.includes(beginning)).toBe(false);
+      expect(text).toContain("Model odpowiedział: „gotowe [ukryte]”.");
+    }
+  });
+
+  it("leaves no part of a credential that the SDK quotes because it cannot be sent: two long lines from a credential command", async () => {
+    // What a command prints that wraps a long token, as base64 does.
+    const [first, second] = [plantedSecret().repeat(8), plantedSecret().repeat(8)];
+    const dir = tempDir();
+    const command = join(dir, "wrapped-token.sh");
+    writeFileSync(command, `#!/bin/sh\nprintf '%s\\n%s\\n' ${first} ${second}\n`, { mode: 0o700 });
+    const out = join(dir, "report.json");
+
+    // Nothing listens on this port, and nothing is sent: the SDK refuses the header value, in a
+    // message that repeats all of it and is longer than what the diagnostics keep of an error.
+    const result = await diagnose(
+      ["--credential-command", `"${command}"`, "--model", "test-model", "--only", "message", "--out", out],
+      { ANTHROPIC_BASE_URL: "http://127.0.0.1:9" },
+    );
+
+    const hidden = (text: string) => text.replaceAll(first.slice(0, 8), "<THE SECRET>");
+    expect(result.code, hidden(result.output)).toBe(1);
+    for (const text of [result.output, readFileSync(out, "utf8")]) {
+      expect(text.includes(first.slice(0, 8))).toBe(false);
+      expect(text.includes(second.slice(0, 8))).toBe(false);
+      // The file holds the quotation marks of the message escaped.
+      expect(text).toMatch(/Headers\.append: \\?"\[ukryte\]\\?" is an invalid header value\./);
+    }
+  });
+
+  it("leaves no part of a credential that a long error spells with JSON escapes", async () => {
+    // Slashes all through it: the gateway escapes each of them, as PHP does when it writes JSON.
+    const secret = plantedSecret().replace(/(..)(?=.)/g, "$1/");
+    const url = await listen(async (request) => {
+      const presented = request.headers.get("x-api-key") ?? "";
+      // Written by hand: JSON.stringify() leaves a slash as it is.
+      const message = `${"y".repeat(560)} token ${presented.replaceAll("/", "\\/")} is not valid`;
+      return new Response(`{"type":"error","error":{"type":"authentication_error","message":"${message}"}}`, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const out = join(tempDir(), "report.json");
+
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--out", out], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: secret,
+    });
+
+    const beginning = secret.slice(0, 8);
+    expect(result.code, result.output.replaceAll(beginning, "<THE SECRET>")).toBe(1);
+    for (const text of [result.output, readFileSync(out, "utf8")]) {
+      expect(text.includes(beginning)).toBe(false);
+      expect(text).toContain("token [ukryte] is not valid");
+    }
+  });
+
+  it("keeps out what a custom header carries, whatever the header is called", async () => {
+    const [gateway, proxy, session] = [plantedSecret(), plantedSecret(), plantedSecret()];
+    // A gateway that shows what it was sent, the cookie it did not know by itself as well.
+    const url = await listen(async (request) => {
+      const header = (name: string) => request.headers.get(name) ?? "";
+      const cookie = /session=([^;]*)/.exec(header("cookie"))?.[1];
+      const message = `Rejected: gateway ${header("x-gateway-token")}, proxy ${header("proxy-authorization")}, cookies ${header("cookie")}, session ${cookie}`;
+      return Response.json({ type: "error", error: { type: "authentication_error", message } }, { status: 401 });
+    });
+    const dir = tempDir();
+    const settingsPath = join(dir, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: url,
+          ANTHROPIC_API_KEY: "stand-in-key",
+          ANTHROPIC_CUSTOM_HEADERS: [
+            `X-Gateway-Token: ${gateway}`,
+            `Proxy-Authorization: Basic ${proxy}`,
+            `Cookie: session=${session}; theme=dark`,
+          ].join("\n"),
+          ANTHROPIC_MODEL: "test-model",
+        },
+      }),
+    );
+    const out = join(dir, "report.json");
+    const args = ["--claude-settings", settingsPath, "--only", "message"];
+
+    const table = await diagnose([...args, "--out", out]);
+    const json = await diagnose([...args, "--json", "--no-file"]);
+
+    const hidden = (text: string) =>
+      [gateway, proxy, session].reduce((all, one) => all.replaceAll(one, "<SECRET>"), text);
+    expect(table.code, hidden(table.output)).toBe(1);
+    expect(json.code, hidden(json.output)).toBe(1);
+    for (const text of [table.output, json.output, readFileSync(out, "utf8")]) {
+      for (const secret of [gateway, proxy, session]) expect(text.includes(secret)).toBe(false);
+      // The gateway did repeat all four: the rest of its sentence is there.
+      expect(text).toContain("Rejected: gateway [ukryte], proxy Basic [ukryte], cookies [ukryte], session [ukryte]");
+    }
+    expect(table.stdout).toContain("Raport nie zawiera poświadczeń.");
+  });
+
+  it("leaves the address and the model readable when a custom header carries either", async () => {
+    const secret = plantedSecret();
+    // A gateway that shows what it was sent.
+    const url = await listen(async (request) => {
+      const header = (name: string) => request.headers.get(name) ?? "";
+      const message = `No model ${header("x-model")} at ${header("x-upstream")} for ${header("x-gateway-token")}`;
+      return Response.json({ type: "error", error: { type: "not_found_error", message } }, { status: 404 });
+    });
+    const host = new URL(url).host;
+    const out = join(tempDir(), "report.json");
+
+    const result = await diagnose(["--model", "router-opus-5", "--only", "message", "--out", out], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: "stand-in-key",
+      // Two headers that repeat what the report says anyway, and one that is a secret.
+      ANTHROPIC_CUSTOM_HEADERS: `X-Model: router-opus-5\nX-Upstream: ${host}\nX-Gateway-Token: ${secret}`,
+    });
+
+    const written = readFileSync(out, "utf8");
+    expect(result.code, result.output.replaceAll(secret, "<THE SECRET>")).toBe(1);
+    // What the command that creates a workspace reads from the report.
+    expect(JSON.parse(written).meta).toMatchObject({ endpoint: url, model: "router-opus-5" });
+    for (const text of [result.output, written]) {
+      expect(text.includes(secret)).toBe(false);
+      expect(text).toContain(`No model router-opus-5 at ${host} for [ukryte]`);
+    }
+  });
+
+  it.each([307, 302])(
+    "does not follow a redirect with status %i: nothing reaches the other address, and the check fails",
+    async (status) => {
+      const arrived: string[] = [];
+      const elsewhere = await listen(async (request) => {
+        arrived.push(`${request.method} ${new URL(request.url).pathname}`);
+        return Response.json({
+          id: "msg_elsewhere",
+          type: "message",
+          role: "assistant",
+          model: "test-model",
+          content: [{ type: "text", text: "gotowe" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      });
+      const url = await listen(
+        async (request) =>
+          new Response(null, { status, headers: { location: `${elsewhere}${new URL(request.url).pathname}` } }),
+      );
+
+      // The key goes out as x-api-key, which fetch() would repeat at the new address, and so
+      // would the custom header.
+      const result = await diagnose(["--model", "test-model", "--only", "message", "--no-file"], {
+        ANTHROPIC_BASE_URL: url,
+        ANTHROPIC_API_KEY: plantedSecret(),
+        ANTHROPIC_CUSTOM_HEADERS: `X-Gateway-Token: ${plantedSecret()}`,
+      });
+
+      expect(arrived).toEqual([]);
+      // Not a pass either: the report would vouch for an address that only redirects.
+      expect(result.code, result.output).toBe(1);
+      expect(result.stdout).toContain("BŁĄD        Zwykła wiadomość");
+      expect(result.stdout).toContain(`${status} status code (no body)`);
+      expect(result.stdout).toContain(
+        "Wskazówka: Endpoint odpowiedział przekierowaniem. Diagnostyka, tak jak aplikacja, nie podąża za przekierowaniami, bo wysłałaby dane i poświadczenia pod inny adres. Sprawdź adres w ANTHROPIC_BASE_URL.",
+      );
+    },
+  );
+
+  it("does not repeat a base address that it cannot use", async () => {
+    const secret = plantedSecret();
+    const unusable = [
+      // With a password, and a port that no address can have.
+      `https://svc:${secret}@router.corp.example:99999/llm`,
+      `ftp://svc:${secret}@router.corp.example/llm`,
+      // A key that was put into the wrong variable.
+      `sk-${secret}`,
+    ];
+
+    for (const value of unusable) {
+      const result = await diagnose(["--only", "message", "--no-file"], {
+        ANTHROPIC_BASE_URL: value,
+        ANTHROPIC_API_KEY: "stand-in-key",
+      });
+
+      expect(result.code, result.output.replaceAll(secret, "<THE SECRET>")).toBe(2);
+      expect(result.output.includes(secret)).toBe(false);
+      expect(result.stderr).toMatch(/^ANTHROPIC_BASE_URL (nie jest poprawnym adresem|musi zaczynać się od http)/);
+      expect(result.stdout).toBe("");
+    }
+  });
+
+  it("leaves the report readable when a stand-in key is a word of the report's own", async () => {
+    const url = await serveEchoing();
+
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--json", "--no-file"], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: "endpoint",
+    });
+
+    expect(result.code, result.output).toBe(1);
+    const report = JSON.parse(result.stdout);
+    expect(report.meta.endpoint).toBe(url);
+    expect(report.checks[0].detail).toBe("Invalid credential: [ukryte] ([ukryte])");
+  });
+
+  it("does not take a stand-in key of a few characters for a secret to remove", async () => {
+    const url = await serveEchoing();
+
+    // Replacing every "e" would leave neither the report nor its JSON readable.
+    const result = await diagnose(["--model", "test-model", "--only", "message", "--json", "--no-file"], {
+      ANTHROPIC_BASE_URL: url,
+      ANTHROPIC_API_KEY: "e",
+    });
+
+    expect(result.code, result.output).toBe(1);
+    const report = JSON.parse(result.stdout);
+    expect(report.meta.model).toBe("test-model");
+    expect(report.checks[0].detail).toBe("Invalid credential: e (e)");
   });
 
   it("prints the usage and sends nothing for --help", async () => {

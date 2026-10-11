@@ -84,7 +84,10 @@
                 "deniedGlobals": {
                   "window": "src/shared runs in Node and in the browser.",
                   "document": "src/shared runs in Node and in the browser.",
-                  "process": "src/shared runs in Node and in the browser."
+                  "process": "src/shared runs in Node and in the browser.",
+                  "fetch": "src/shared is imported by the server, which calls out only through the client built in src/server/llm/client.ts (NFR-1).",
+                  "WebSocket": "src/shared is imported by the server, which calls out only through the client built in src/server/llm/client.ts (NFR-1).",
+                  "EventSource": "src/shared is imported by the server, which calls out only through the client built in src/server/llm/client.ts (NFR-1)."
                 }
               }
             }
@@ -142,8 +145,252 @@
                   {
                     "group": ["**/web/**"],
                     "message": "The server must not import browser code."
+                  },
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
                   }
-                ]
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/server/llm/client.ts", "src/server/llm/diagnostics/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/web/**"],
+                    "message": "The server must not import browser code."
+                  },
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/server/workspace/database.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/web/**"],
+                    "message": "The server must not import browser code."
+                  },
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/server/**/*.test.ts", "src/server/**/testing.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/web/**"],
+                    "message": "The server must not import browser code."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/diagnose.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/e2e-workspace.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/server/**",
+        "scripts/**",
+        "!**/*.test.ts",
+        "!src/server/**/testing.ts",
+        "!src/server/llm/client.ts",
+        "!src/server/llm/diagnostics/**",
+        "!scripts/diagnose.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "fetch": "The server calls out only through the client built in src/server/llm/client.ts (NFR-1).",
+                  "WebSocket": "The server opens no outgoing connections of its own (NFR-1).",
+                  "EventSource": "The server opens no outgoing connections of its own (NFR-1)."
+                }
               }
             }
           }
@@ -163,7 +410,22 @@
                     "group": ["**/server/**", "**/web/**"],
                     "message": "src/shared is imported by both sides and must not depend on either."
                   }
-                ]
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                }
               }
             }
           }

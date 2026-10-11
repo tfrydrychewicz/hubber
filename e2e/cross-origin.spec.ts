@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { Page, Response } from "@playwright/test";
 import { createApp } from "../src/server/app.ts";
 import { startServer } from "../src/server/listen.ts";
+import { TEST_WORKSPACE } from "../src/server/testing.ts";
 import { expect, forgetProblems, test } from "./fixtures.ts";
 
 // Stands in for any other website open in the same browser. Another port on
@@ -80,7 +81,7 @@ test("requests started by a page on another origin are refused before an API han
   const server = await startServer({
     port: 0,
     app: ({ port }) => {
-      const app = createApp({ port });
+      const app = createApp({ port, workspace: TEST_WORKSPACE });
       return {
         fetch: async (request, env) => {
           const response = await app.fetch(request, env);

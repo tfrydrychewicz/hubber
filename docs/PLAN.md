@@ -21,14 +21,16 @@ Decyzje doprecyzowują rozdział 11 PRD. Zmiana którejkolwiek wymaga aktualizac
 | Obszar | Decyzja | Uzasadnienie |
 |---|---|---|
 | Repozytorium | Jeden pakiet TypeScript z katalogami `src/shared`, `src/server`, `src/web`, `evals`, `scripts`, `e2e` (testy Playwright). | Jeden użytkownik i jeden proces; podział na pakiety nic nie daje. |
-| Środowisko | Node 26 (`.nvmrc`). Serwer i skrypty uruchamia sam `node`, bez `tsx` i bez kompilacji. | Aktualne wersje Vite i Vitest wymagają Node 22.12 lub nowszego; Node 26 wykonuje pliki TypeScript bezpośrednio. Kod po stronie Node musi używać wyłącznie składni usuwalnej (`erasableSyntaxOnly`). |
+| Środowisko | Node 26 (`.nvmrc`). Serwer i skrypty uruchamia sam `node`, bez `tsx` i bez kompilacji. Nowa wersja Node wchodzi do użytku dopiero wtedy, gdy przejdzie na niej `npm run check`. | Aktualne wersje Vite i Vitest wymagają Node 22.12 lub nowszego; Node 26 wykonuje pliki TypeScript bezpośrednio. Kod po stronie Node musi używać wyłącznie składni usuwalnej (`erasableSyntaxOnly`). Kontrola połączeń przy starcie i obserwator połączeń w testach czytają wewnętrzne struktury Node (sprawdzone na 26.5); testy, które uruchamiają prawdziwe procesy, zawodzą, gdy Node je zmieni. |
 | Serwer | Hono na własnym `http.Server`, nasłuch na 127.0.0.1. Serwer wczytuje zbudowany interfejs raz, przy starcie, więc nową wersję pokazuje dopiero po restarcie. | Zwykły HTTP i SSE, łatwe do sprawdzenia narzędziem `curl`. Gotowe `serve()` z adaptera bez podanego hosta nasłuchuje na wszystkich interfejsach i wywraca proces przy zajętym porcie. Budowanie przepisuje katalog `dist/web` w miejscu; serwer czytający pliki przy każdym żądaniu odpowiadałby w tym czasie błędem 404, a potem podawał interfejs nowszy niż własny kod. Pliki interfejsu idą z pamięci bez obsługi żądań `Range`, co nabierze znaczenia, gdy znajdzie się wśród nich dźwięk lub wideo. |
 | Ochrona lokalnego API | Strażnik nagłówków `Host` i `Origin` na każdej ścieżce, nagłówki bezpieczeństwa z Content-Security-Policy, żadnych nagłówków CORS. | Nasłuch na 127.0.0.1 nie chroni przed stronami otwartymi w tej samej przeglądarce (DNS rebinding, CSRF). Strażnik nie jest uwierzytelnieniem: procesy na tym komputerze nadal mogą wołać API. |
-| Tryb deweloperski | Dwa procesy uruchamiane jednym skryptem: `node --watch` dla serwera i Vite dla interfejsu. Proxy Vite przekazuje serwerowi tylko `/api` i ścieżki poniżej. | Warianty jednoprocesowe po każdym przeładowaniu dokładały pętlę w tle albo kładły całą stronę przy błędzie serwera. |
+| Tryb deweloperski | Dwa procesy uruchamiane jednym skryptem: `node --watch` dla serwera i Vite dla interfejsu. Proxy Vite przekazuje serwerowi tylko `/api` i ścieżki poniżej. Skrypt zatrzymuje oba, gdy kończy pracę, także po sygnale `SIGQUIT`; gdy sam zostanie zabity sygnałem `SIGKILL`, robi to za niego proces-strażnik, którego skrypt po sobie zostawia. | Warianty jednoprocesowe po każdym przeładowaniu dokładały pętlę w tle albo kładły całą stronę przy błędzie serwera. Oba serwery działają we własnych grupach procesów, więc po zabitym skrypcie zostawałyby z zajętymi portami i otwartym workspace'em. |
 | Linter i formatowanie | Biome w przypiętej wersji. | `typescript-eslint` nie uruchamia się z TypeScript 7. |
 | Interfejs | React, Vite, TanStack Query, Tailwind, TipTap. | Zgodnie z PRD; TipTap wymusza środowisko przeglądarkowe. |
-| Baza | SQLite przez `better-sqlite3`, schemat i migracje w Drizzle. | Jeden plik, wbudowane FTS5, migracje w repozytorium. |
-| Schematy | Zod jako jedno źródło: walidacja API, walidacja operacji i JSON Schema dla narzędzi modelu. | Model, serwer i interfejs nie mogą się rozjechać. |
+| Baza | SQLite przez `better-sqlite3`, schemat i migracje w Drizzle. Plik pracuje w trybie WAL; jedyne połączenie otwiera `src/server/workspace/database.ts`, po sprawdzeniu przypięcia workspace'u do endpointu. Każde zatwierdzenie czeka, aż dysk utrwali dane: połączenie dostaje przy tworzeniu bazy i przy każdym otwarciu `synchronous = FULL`, `fullfsync = ON` i `checkpoint_fullfsync = ON`. | Jeden plik, wbudowane FTS5, migracje w repozytorium. Przy działającej aplikacji obok bazy leżą pliki `-wal` i `-shm`; po czystym zamknięciu zostaje jeden plik, więc kopia katalogu zrobiona przy zatrzymanej aplikacji jest pełną kopią zapasową. Na macOS samo `synchronous = FULL` oddaje dane dyskowi i na niego nie czeka; zmierzone: z oboma ustawieniami `fullfsync` zatwierdzenie trwa około 3 ms, bez nich 0,05 ms. |
+| Workspace | Katalog z plikiem `workspace.json` (nazwa i profil LLM, bez sekretów), bazą `hubber.sqlite` i katalogiem `files/`. Adres endpointu jest zapisany w konfiguracji i w bazie; aplikacja otwiera workspace tylko wtedy, gdy oba zapisy są zgodne ze sobą i z adresem w `ANTHROPIC_BASE_URL`, jeśli ta zmienna jest ustawiona. Poświadczenia leżą poza workspace'em i są przypisane do adresu endpointu. | CFG-1, CFG-4, NFR-2, NFR-8. Skopiowany lub ręcznie zmieniony workspace nie wyśle danych ani poświadczeń pod inny adres. |
+| Wyjście do sieci | Klienta SDK aplikacji buduje wyłącznie `src/server/llm/client.ts`: adres i poświadczenie bierze z otwartego workspace'u, zatrzymuje każde żądanie spoza przypiętego endpointu i nie podąża za przekierowaniami. Połączenia otwiera sam, przez własnych agentów `node:http` i `node:https`: nie sięgają ich ustawienia proxy Node'a ani zmienna `NODE_TLS_REJECT_UNAUTHORIZED`, a certyfikat endpointu jest zawsze sprawdzany. Proxy nie jest obsługiwane, a start z włączoną obsługą proxy Node'a jest odrzucany. Wyjątkiem jest diagnostyka endpointu (`scripts/diagnose.ts`, `src/server/llm/diagnostics`), która buduje własnego klienta dla adresu ze środowiska i używa `fetch`. Pozostały kod serwera, kod współdzielony i skrypty nie używają `fetch`, `WebSocket` ani `EventSource`, a poza skryptem, który przygotowuje workspace testów end-to-end, nie importują testów ani ich modułów pomocniczych; pilnuje tego linter. Moduły Node'a prowadzące do sieci i do uruchamiania programów (`node:http`, `node:net`, `node:child_process` i pokrewne) wolno importować tylko plikom wymienionym w `scripts/lint-boundaries.test.ts`. | NFR-1 i NFR-2. Zmierzone: zwykły `fetch` po odpowiedzi 307 lub 308 wysyła treść żądania pod wskazany adres, razem z nagłówkiem `x-api-key`; dlatego za przekierowaniami nie podąża też diagnostyka. Zmierzone: przy włączonej obsłudze proxy Node'a przez proxy idą `fetch` i agenci globalni, a agent utworzony bez ustawień proxy łączy się bezpośrednio. Test połączeń sprawdza tylko ścieżki, które sam przechodzi; granice w linterze obejmują także kod, do którego żaden test nie dociera. |
+| Schematy | Zod jako jedno źródło: walidacja API, walidacja operacji i JSON Schema dla narzędzi modelu. Pliki czytane przy starcie (`workspace.json`, plik poświadczeń) mają własne walidatory. | Model, serwer i interfejs nie mogą się rozjechać. Komunikat o błędzie w pliku poświadczeń nie może zacytować jego treści, a walidator konfiguracji zgłasza wszystkie błędy naraz i odrzuca nieznane pola. |
 | Mutacje | Każda zmiana danych, także ręczna edycja użytkownika, przechodzi przez framework operacji. | Jedna historia zmian dla osi czasu, dziennika i cofania. |
 | Zatwierdzanie | Operacje przebiegu agenta są najpierw odkładane, a stosowane dopiero po operacji `finish`. | Nieudany przebieg nie zostawia połowy zmian; ponowienie nie tworzy duplikatów. |
 | Zależności operacji | Operacja może zależeć od innej (np. zadanie od nowej osoby). Akceptacja i odrzucenie działają kaskadowo. | Propozycje często odwołują się do obiektów, które same czekają na decyzję. |
@@ -79,8 +81,9 @@ Obowiązują we wszystkich pakietach, które wywołują model.
 - Workspace deweloperski używa bezpośredniego API Anthropic i wyłącznie danych syntetycznych.
 - Workspace służbowy używa routera i istnieje tylko na maszynie służbowej.
 - Od pierwszego tygodnia używania baza zawiera prawdziwe dane. Każda późniejsza zmiana schematu jest migracją w przód.
-- Katalogi workspace'ów i pliki z poświadczeniami leżą poza repozytorium.
-- Projekt wymaga Node 26. Na starszej wersji `npm install` kończy się błędem, a `npm start`, `npm run dev`, `npm run build`, `npm test`, `npm run test:watch`, `npm run check` i `npm run diagnose` wypisują komunikat po polsku, zanim cokolwiek uruchomią.
+- Katalogi workspace'ów i pliki z poświadczeniami leżą poza repozytorium. Workspace leży domyślnie w `~/Library/Application Support/Hubber/workspaces/default`, a inny katalog wskazuje zmienna `HUBBER_WORKSPACE`. Plik poświadczeń leży domyślnie w `~/.config/hubber/credentials.json`, a inny wskazuje zmienna `HUBBER_CREDENTIALS_FILE`.
+- Testy i sesje agentów nie uruchamiają aplikacji na workspace'ie właściciela. Testy tworzą własne workspace'y w katalogu tymczasowym; proces bez zmiennych `HUBBER_WORKSPACE` i `HOME` nie ma workspace'u domyślnego. Dla sesji agentów jest to reguła zapisana w `CLAUDE.md`: każde polecenie samo niesie zmienną `HUBBER_WORKSPACE` z jednorazowym katalogiem, bo powłoka agenta nie przenosi zmiennych między poleceniami. Na wypadek pominięcia zmiennej kod odmawia takiej sesji workspace'u domyślnego: gdy środowisko wskazuje sesję agenta (zmienna `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` albo `AI_AGENT`), `npm start`, `npm run dev` i `npm run workspace:create` bez zmiennej kończą się kodem 2. Workspace wskazany wprost otwiera się także w sesji agenta, więc tu obowiązuje sama reguła.
+- Projekt wymaga Node 26. Na starszej wersji `npm install` kończy się błędem, a `npm start`, `npm run dev`, `npm run build`, `npm test`, `npm run test:watch`, `npm run check`, `npm run diagnose` i `npm run workspace:create` wypisują komunikat po polsku, zanim cokolwiek uruchomią.
 
 ### Prompty
 
@@ -175,7 +178,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - `git init`, `.gitignore` obejmujący katalogi workspace'ów i pliki środowiskowe.
 - TypeScript w trybie `strict`, linter, Vitest, Playwright.
 - Serwer Hono nasłuchujący wyłącznie na 127.0.0.1; aplikacja React serwowana przez ten sam proces w trybie produkcyjnym.
-- Strażnik nagłówków `Host` i `Origin` oraz nagłówki bezpieczeństwa na każdej odpowiedzi aplikacji, sprawdzane także testami w przeglądarce.
+- Strażnik nagłówków `Host` i `Origin` oraz nagłówki bezpieczeństwa na każdej odpowiedzi, sprawdzane także testami w przeglądarce. Nagłówki mają również odpowiedzi, których Node albo adapter HTTP udziela bez pytania aplikacji: 400 przy braku nagłówka `Host` albo przy nagłówku lub adresie żądania, z których nie da się złożyć adresu, 417 przy nieznanym `Expect` oraz 500 i 504, gdy aplikacja zawiedzie.
 - Jedno polecenie instaluje zależności (`npm install`) i jedno uruchamia aplikację (`npm start`); `npm run dev` uruchamia tryb deweloperski.
 - **Gotowe, gdy:** pusta aplikacja startuje jednym poleceniem na macOS w Chrome, a test sprawdza, że serwer nie nasłuchuje na innym interfejsie.
 
@@ -183,12 +186,15 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 
 **Wymagania:** CFG-1, CFG-2, CFG-3, CFG-4, CFG-6, NFR-1, NFR-2.
 
-- Polecenie tworzące workspace: katalog, plik konfiguracji, pusta baza, katalog plików.
-- Konfiguracja przechowuje nazwę, adres endpointu, rodzaj profilu, identyfikatory modeli dla ról i wynik diagnostyki. Nie przechowuje sekretów.
-- Przypięcie: adres endpointu zapisany w konfiguracji i w bazie; przy starcie aplikacja porównuje go z aktywnym i odmawia otwarcia przy różnicy.
-- Poświadczenia w kolejności: zmienne środowiskowe, plik lokalny poza repozytorium, polecenie pomocnicze z pamięcią podręczną i odświeżaniem.
-- Punkt API zwracający nazwę workspace'u i endpoint dla interfejsu.
-- Test sprawdzający, że aplikacja nie wykonuje połączeń poza skonfigurowany endpoint.
+**Stan:** kod i testy gotowe (`npm run workspace:create`; moduły w `src/server/workspace` i `src/server/llm/credentials`). `npm run check` przechodzi: 1717 testów jednostkowych w 54 plikach. Testy end-to-end uruchamiają aplikację na jednorazowym workspace'ie, który każdy przebieg tworzy od nowa w katalogu tymczasowym, i pod obserwatorem połączeń, którego zapis przebieg sprawdza na końcu: z 44 testów w Chromium i w silniku WebKit przechodzi 43, a pomijany jest ten sam jeden co w `M1a-2`, test DNS rebinding w WebKit. Z `HUBBER_E2E_CHROME=1` dochodzi Google Chrome: z 66 testów przechodzi 65, a pominięty jest ten sam jeden. Do zamknięcia pakietu brakuje utworzenia workspace'u na maszynie służbowej.
+
+- Polecenie tworzące workspace (`npm run workspace:create`): katalog, plik konfiguracji, pusta baza, katalog plików. Tworzy wyłącznie nowy katalog, z niczym się nie łączy i nie czyta poświadczeń.
+- Konfiguracja przechowuje nazwę, adres endpointu, rodzaj profilu, sposób uwierzytelnienia, identyfikatory modeli dla ról i werdykty diagnostyki wzięte z raportu `npm run diagnose`. Nie przechowuje sekretów.
+- Przypięcie: adres endpointu zapisany w konfiguracji i w bazie. Aktywny endpoint to adres ze zmiennej `ANTHROPIC_BASE_URL`: gdy jest ustawiona i wskazuje inny adres, aplikacja odmawia otwarcia workspace'u (kod wyjścia 3); tak samo, gdy konfiguracja i baza podają różne adresy. Bez tej zmiennej workspace się otwiera, a poświadczenia ze zmiennych środowiskowych należą wtedy wyłącznie do `https://api.anthropic.com`.
+- Poświadczenia w kolejności: zmienne środowiskowe, plik lokalny poza repozytorium, polecenie pomocnicze z pamięcią podręczną i odświeżaniem. Każde źródło wydaje poświadczenie tylko dla adresu, do którego je przypisano. Polecenie pomocnicze konfiguruje się w pliku poświadczeń, nie w workspace'ie.
+- Punkt API `GET /api/workspace` zwracający nazwę workspace'u i origin przypiętego endpointu (schemat, host, port). Ścieżka adresu nie trafia do przeglądarki; pełny adres wypisuje serwer przy starcie.
+- Test sprawdzający, że aplikacja nie wykonuje połączeń poza skonfigurowany endpoint: proces serwera i klient SDK pod obserwatorem połączeń (`src/server/egress.test.ts`). Pod tym samym obserwatorem działa serwer testów end-to-end, a przebieg kończy się błędem, jeśli serwer zrobił cokolwiek poza otwarciem swojego portu albo obserwatora w nim nie było (`e2e/egress.ts`).
+- `better-sqlite3` wchodzi w tym pakiecie, bo to on pierwszy otwiera bazę: wersja dokładna, z gotowymi binariami. Wpis `allowScripts` w `package.json` odmawia mu skryptu instalacyjnego, dzięki czemu czysta instalacja nie potrzebuje Pythona ani kompilatora.
 - **Gotowe, gdy:** workspace utworzony dla jednego endpointu nie otwiera się z innym; sekretu nie ma w bazie ani w katalogu workspace'u.
 
 ### M1a-4 Schemat danych i migracje (M)
@@ -199,8 +205,12 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Identyfikatory nadawane po stronie aplikacji, żeby operacje mogły się do nich odwoływać przed zapisem obiektu.
 - Data ostatniej aktywności itemu utrzymywana przy każdej operacji.
 - Migracje z automatyczną kopią pliku bazy.
-- Sygnał, który przyjdzie, zanim serwer zacznie nasłuchiwać, kończy dziś proces natychmiast, bez procedury zamykania: obsługa sygnałów jest rejestrowana dopiero po rozpoczęciu nasłuchu. Jeśli baza ma być otwierana i migrowana przed nasłuchem, pakiet rozstrzyga, co dzieje się z sygnałem w tym czasie.
-- `better-sqlite3` jest modułem natywnym ze skryptem instalacyjnym. npm 11 ostrzega dziś o niezatwierdzonych skryptach i zapowiada ich blokowanie, więc pakiet trzeba zatwierdzić w `package.json` (`npm approve-scripts`) i sprawdzić instalację na czystym klonie.
+- Baza jest otwierana w funkcji budującej aplikację: po zajęciu portu, a przed rejestracją obsługi sygnałów. Port chroni bazę przed drugą instancją uruchomioną na tym samym porcie. Sygnał, który przyjdzie w tym oknie, kończy proces natychmiast; z migracjami okno się wydłuży, więc pakiet rozstrzyga, co dzieje się z sygnałem w tym czasie.
+- `better-sqlite3` jest zależnością od `M1a-3`, z odmową skryptu instalacyjnego w `allowScripts`. Razem z `drizzle-kit` trzeba tam dopisać `"esbuild": false` i sprawdzić instalację na czystym klonie.
+- Drizzle dostaje połączenie z `openWorkspaceDatabase()`; innej drogi do bazy nie ma (linter). Tabeli `workspace_pin` nie deklaruje się w schemacie Drizzle, a `PRAGMA user_version` należy do warstwy workspace'u. Sprawdzenie przypięcia poprzedza każdą migrację.
+- Każde zatwierdzenie na tym połączeniu czeka na dysk i trwa około 3 ms, więc zapisy, które należą do siebie, idą w jednej transakcji. Ustawienia są nadawane połączeniu przy otwarciu, Drizzle dostaje je razem z nim.
+- Kopia przed migracją to migawka `VACUUM INTO` w nowym pliku z uprawnieniami 0600, nie kopia pliku: baza pracuje w trybie WAL.
+- Migrator Drizzle wykonuje zaległe migracje w jednej transakcji, w której SQLite ignoruje `PRAGMA foreign_keys`. Migracja przebudowująca tabelę wymaga wyłączenia kluczy obcych na połączeniu przed `migrate` i `PRAGMA foreign_key_check` po niej. (Z dokumentacji, do sprawdzenia w pakiecie.)
 - Generator danych syntetycznych w skali z NFR-6 do testów wydajności.
 - **Gotowe, gdy:** migracja na pustej i na wypełnionej bazie przechodzi, a kopia powstaje przed każdą migracją.
 
@@ -224,10 +234,14 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 
 **Wymagania:** ING-9; podstawa dla NFR-11.
 
-- Klient SDK budowany z profilu workspace'u; funkcje opcjonalne włączane według wyniku diagnostyki.
+- Klienta SDK buduje wyłącznie `createLlmClient()` z `M1a-3`. Model roli podaje `modelFor()`, a funkcje opcjonalne `capabilitiesOf()`; funkcja opcjonalna jest włączana tylko dla roli, której model jest tym, dla którego wykonano diagnostykę.
 - Definicje narzędzi generowane ze schematów operacji.
 - Pętla zgodna z regułami warstwy LLM z rozdziału 2: strumieniowanie, walidacja wejścia każdego narzędzia, błąd walidacji odsyłany jako wynik z `is_error`, limit iteracji i czasu.
 - Protokół zakończenia: gdy model kończy turę bez `finish`, dostaje jedno przypomnienie; kolejny brak kończy przebieg błędem.
+- Pętla rozróżnia błędy spoza SDK: `CredentialError` (nie udało się zdobyć poświadczenia; komunikat jest dla użytkownika), status 300–399 (endpoint przekierowuje, czyli adres jest błędny) i `EndpointPinError` (błąd w kodzie, bez ponowień). Test `src/server/egress.test.ts` dostaje ścieżkę użytkownika z wywołaniem modelu, a sprawdzenie na końcu testów end-to-end (`e2e/egress.ts`) zaczyna dopuszczać połączenia z endpointem workspace'u.
+- Każdy tekst błędu, który jest zapisywany albo pokazywany, przechodzi przez `redact()` dostawcy poświadczeń. Klient sam czyści treść i nagłówki odpowiedzi z błędem, także z poświadczenia zapisanego sekwencjami JSON lub URL; nie czyści odpowiedzi udanych ani zdarzenia `error` wewnątrz strumienia o statusie 200. Postaci, które zmieniają wartość w całości (base64, skrót, fragment), nie są rozpoznawane.
+- Do `client.withOptions()` ani do pojedynczego żądania nie przekazuje się `fetch` ani `middleware`: `fetch` wywołującego zastąpiłby ten przypięty do endpointu.
+- Klient otwiera jedno połączenie na wywołanie, prosi o odpowiedź bez kompresji i odrzuca skompresowaną; router, który kompresuje mimo to, wymaga dopisania dekompresji.
 - Prompt systemowy: rola, zasady PRD, definicja pewności, obowiązek cytatu, traktowanie materiału jako danych.
 - Budowa kontekstu: stały prompt, migawka indeksu aktywnych itemów i osób, bieżąca data w wiadomości użytkownika. Materiał jest wyraźnie oddzielony od tekstu wpisanego.
 - Log każdego wywołania: model, tokeny, odczyty cache, czas, `stop_reason`, błąd.
@@ -240,6 +254,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 **Wymagania:** CAP-5, CAP-6, CAP-7, ING-1, ING-2, ING-3, ING-4, ING-10, ING-11, NFR-7.
 
 - Kolejka: dzierżawa zadania, ponowienia z rosnącym odstępem, wznowienie po restarcie, limit równoległości.
+- Kolejka zakłada jeden proces na workspace. Dwa serwery na różnych portach mogą dziś otworzyć ten sam workspace; pakiet rozstrzyga, czy baza ma być otwierana na wyłączność (`PRAGMA locking_mode = EXCLUSIVE`), co odbiera dostęp narzędziom działającym w osobnym procesie.
 - Zapis wrzutki w oryginale przed jakimkolwiek przetwarzaniem; pliki adresowane skrótem treści.
 - Transkrypcja obrazu osobnym wywołaniem: uczestnicy, znaczniki czasu, treść, widoczna data. Wynik zapisany jako tekst, na którym weryfikowane są cytaty.
 - Ustalenie daty zdarzenia i oznaczenie jej jako przybliżonej, gdy źródło jej nie podaje.
@@ -259,8 +274,8 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - W `scripts/dev.test.ts` jest już miejsce na test strumienia, który proxy trybu deweloperskiego zrywa, gdy serwer API pada w trakcie odpowiedzi: grupa, która uruchamia Vite z atrapą API.
 - Odpowiedzi `/api` dostają domyślnie `Cache-Control: no-store`; trasa, która chce inaczej, ustawia nagłówek sama.
 - Schematy żądań i odpowiedzi współdzielone z interfejsem.
-- Kontrakty leżą w `src/shared` jako zwykłe typy i walidatory, importowane przez obie strony, tak jak dziś kontrakt `/api/health`. Typowany klient Hono odpada: wymaga importu typu aplikacji z `src/server`, a tego interfejsowi zabrania linter.
-- Content-Security-Policy nie zawiera `'unsafe-eval'`, a Zod 4 przy pierwszym parsowaniu obiektu w przeglądarce próbuje wygenerować kod: przeglądarka zgłasza w konsoli naruszenie polityki, a testy end-to-end nie przepuszczają żadnego błędu konsoli. W interfejsie trzeba więc włączyć `z.config({ jitless: true })`, zanim zostanie użyty pierwszy schemat.
+- Kontrakty leżą w `src/shared` jako zwykłe typy i walidatory, importowane przez obie strony, tak jak dziś kontrakt `/api/health`. Typowany klient Hono odpada: wymaga importu typu aplikacji z `src/server`, a tego interfejsowi zabrania linter. Kontrakty `/api/health` i `/api/workspace` przechodzą na Zod razem z resztą. Origin endpointu w kontrakcie `/api/workspace` pozostaje przy tym wzorcem (wyrażeniem regularnym), bez `z.url()` i bez porównania przez `new URL`: serwer sprawdza swoją odpowiedź tym samym walidatorem co strona, a parsery adresów się różnią (Chromium zapisuje `*` w nazwie hosta jako `%2A`). Z tego samego powodu ścisła reguła nazwy workspace'u zostaje w walidatorze pliku konfiguracji, a kontrakt wymaga tylko nazwy niepustej: klasy znaków Unicode w wyrażeniach regularnych zależą od silnika.
+- Content-Security-Policy nie zawiera `'unsafe-eval'`. Zod 4 (sprawdzone na 4.6.5) przy tworzeniu pierwszego schematu obiektu, czyli już podczas importu modułu ze schematami, sprawdza wywołaniem `new Function("")`, czy może generować kod. Przeglądarka blokuje to wywołanie i zgłasza zdarzenie `securitypolicyviolation`, ale niczego nie wypisuje w konsoli, więc dzisiejsze testy end-to-end tego nie zauważą. `z.config({ jitless: true })` musi się wykonać przed utworzeniem pierwszego schematu: w module `src/shared/zod.ts`, z którego wszystkie schematy biorą `z`; import `zod` z innego miejsca blokuje linter. Fixture testów end-to-end zgłasza każde zdarzenie `securitypolicyviolation`. `zod/mini` tej próby nie wykonuje wcale, a paczka jest z nim o około 50 kB mniejsza (14 kB po kompresji); wybór między nim a pełnym `zod` zapada razem ze schematami operacji.
 - **Gotowe, gdy:** zapis wrzutki zwraca odpowiedź w czasie do 300 ms na danych w skali z NFR-6.
 
 ### M1a-9 Powłoka aplikacji i pole wejściowe (M)
@@ -268,6 +283,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 **Wymagania:** CAP-1, CAP-2, CAP-3, CAP-4, CFG-3, VIEW-3, NFR-9.
 
 - Układ z nawigacją, stałym wskaźnikiem workspace'u i endpointu oraz licznikiem Inboxu.
+- Wskaźnik workspace'u istnieje od `M1a-3` (`WorkspaceIndicator`); powłoka go przenosi. Powłoka i każdy późniejszy ekran czytają workspace przez hook `useWorkspace()` (`src/web/use-workspace.ts`), nie wprost z zapytania: hook zwraca stan oczekiwania, błąd albo potwierdzony workspace i to w nim mieszka reguła, że odpowiedź starsza niż nieudane sprawdzenie nie jest pokazywana. Gdy workspace zmieni się pod otwartą kartą (serwer uruchomiony ponownie z innym workspace'em), powłoka czyści dane i szkic wejścia poprzedniego workspace'u; workspace rozpoznaje po dacie utworzenia, którą `GET /api/workspace` zaczyna wtedy zwracać.
 - Pole wejściowe dostępne na każdym ekranie: tekst wpisany, wklejanie obrazów, przeciąganie plików.
 - Wklejony tekst powyżej ustalonej długości staje się osobnym elementem materiału; krótkie wklejenia zostają w tekście wpisanym.
 - Wysłanie czyści pole natychmiast; lista wysłanych wejść pokazuje ich stan na żywo.
@@ -348,6 +364,8 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Wszystkie projekty Playwrighta (Chromium, WebKit i opcjonalny Google Chrome) korzystają z jednej instancji serwera i jej danych, więc test zapisujący dane zobaczy też to, co ten sam test zapisał w innej przeglądarce.
 - Pomiar czasów z NFR-5 na danych w skali z NFR-6.
 - Polecenie kopii zapasowej katalogu workspace'u i sprawdzone odtworzenie z kopii.
+- Polecenie kopii robi migawkę przez SQLite (`VACUUM INTO` albo API kopii), nie kopię plików: kopia samego `hubber.sqlite` wykonana przy działającej aplikacji może nie zawierać ostatnich zapisów.
+- Odtworzenie wstawia kopię w miejsce całego katalogu workspace'u i nigdy nie kopiuje plików do istniejącego. Obok odtworzonego `hubber.sqlite` nie mogą zostać pliki `hubber.sqlite-wal` i `hubber.sqlite-shm` poprzedniego stanu: SQLite stosuje taki dziennik do odtworzonej bazy przy pierwszym otwarciu (sprawdzone: wraca wtedy zapis zrobiony po wykonaniu kopii, a aplikacja startuje bez słowa).
 - Tydzień codziennego użycia w workspace służbowym; lista błędów i tarć.
 - **Gotowe, gdy:** warunek zamknięcia M1a jest spełniony, a błędy blokujące poprawione.
 
@@ -611,6 +629,7 @@ Te kroki wymagają właściciela i nie da się ich zlecić.
 |---|---|
 | Przed M1a-6 | Uruchomić diagnostykę z `M1a-1` na maszynie służbowej i przekazać plik wyniku. |
 | Przed M1a-3 | Ustalić, jak router wydaje poświadczenia: stały token czy polecenie pomocnicze. |
+| Po M1a-3 | Utworzyć workspace na maszynie służbowej (`npm run workspace:create`) z raportem diagnostyki. Sprawdzić tam, czy start nie jest odrzucany z powodu włączonej obsługi proxy Node'a (`NODE_USE_ENV_PROXY`, `--use-env-proxy`), czy w tamtejszej powłoce przechodzi `npm run check` (z obsługą proxy część testów zawodzi, a diagnostyka łączy się przez proxy, inaczej niż aplikacja) i czy katalog `~/Library/Application Support` nie jest objęty firmową synchronizacją lub kopią. |
 | W trakcie M0 lub przed M1a-11 | Potwierdzić słowniki statusów, ról i typów faktów. |
 | Koniec M1a, M1b, M1c | Tydzień codziennego użycia w workspace służbowym; lista błędów i tarć. |
 | Koniec M1c | Przegląd metryk i decyzja o M2. |

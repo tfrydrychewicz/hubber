@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,7 +17,9 @@ import {
   occupyPort,
   type SpawnedNode,
   spawnNode,
+  TEST_WORKSPACE,
 } from "../src/server/testing.ts";
+import { createTestWorkspace, type TestWorkspace } from "../src/server/workspace/testing.ts";
 
 const HOST = "127.0.0.1";
 const READY = "Hubber działa w trybie deweloperskim";
@@ -93,6 +95,30 @@ if (process.argv[1]?.endsWith(options.get("script"))) {
 }
 `;
 
+// Loaded into the runner ahead of its own code. The runner then says so on stderr whenever it
+// starts one of its servers, which run on the Node that runs the runner. The one other program
+// it starts is the guard that stops the servers should the runner be killed.
+const STARTED_A_SERVER = "Started a server.";
+const STARTED_THE_GUARD = "Started the guard.";
+const REPORT_STARTS = `import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+const { spawn } = childProcess;
+childProcess.spawn = (file, ...rest) => {
+  console.error(file === process.execPath ? "${STARTED_A_SERVER}" : "${STARTED_THE_GUARD}");
+  return spawn(file, ...rest);
+};
+syncBuiltinESMExports();
+`;
+
+// Loaded into every process of a session. Each says which of the SDK's variables it was started
+// with, and says so before its own code runs: the API server takes them out of its environment
+// first thing. The runner passes the line on under the name of the server that printed it.
+const SDK_VARIABLES = "SDK variables at start:";
+const REPORT_SDK_VARIABLES = `import { isMainThread } from "node:worker_threads";
+const names = Object.keys(process.env).filter((name) => name.startsWith("ANTHROPIC_"));
+if (isMainThread) console.log(\`${SDK_VARIABLES} \${JSON.stringify(names.sort())}\`);
+`;
+
 // The two servers of a session: the script each one runs, and the variable that holds its port.
 const SERVERS = {
   api: { script: "src/server/main.ts", port: "HUBBER_PORT" },
@@ -102,7 +128,7 @@ const SERVERS = {
 interface RunnerOptions {
   /** Options for the Node that runs the runner; its servers do not get them. */
   nodeArgs?: string[];
-  /** Added to the runner's environment, which it hands down to both servers. */
+  /** Added to the runner's environment, which already names the workspace of this file. */
   env?: Record<string, string>;
 }
 
@@ -123,6 +149,12 @@ let takePortsAfterCheck: string;
 let fastClock: string;
 let jumpAhead: string;
 let startLate: string;
+let reportStarts: string;
+let reportSdkVariables: string;
+// The throwaway workspace that every session of this file opens unless the test names another.
+let workspace: TestWorkspace;
+// Stands in for the home directory of the owner, for a session that is given one. It holds nothing.
+let emptyHome: string;
 
 beforeAll(() => {
   workDir = mkdtempSync(join(tmpdir(), "hubber-dev-"));
@@ -130,13 +162,21 @@ beforeAll(() => {
   fastClock = join(workDir, "fast-clock.mjs");
   jumpAhead = join(workDir, "jump-ahead.mjs");
   startLate = join(workDir, "start-late.mjs");
+  reportStarts = join(workDir, "report-starts.mjs");
+  reportSdkVariables = join(workDir, "report-sdk-variables.mjs");
   writeFileSync(takePortsAfterCheck, TAKE_PORTS_AFTER_CHECK);
   writeFileSync(fastClock, FAST_CLOCK);
   writeFileSync(jumpAhead, JUMP_AHEAD);
   writeFileSync(startLate, START_LATE);
+  writeFileSync(reportStarts, REPORT_STARTS);
+  writeFileSync(reportSdkVariables, REPORT_SDK_VARIABLES);
+  workspace = createTestWorkspace();
+  emptyHome = join(workDir, "home");
+  mkdirSync(emptyHome);
 });
 
 afterAll(() => {
+  workspace.remove();
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -187,6 +227,8 @@ function neverStarting(server: keyof typeof SERVERS): Record<string, string> {
   return { NODE_OPTIONS: `--import=${standIn.href}` };
 }
 
+// spawnNode() builds the environment from scratch: no HOME and none of the developer's own
+// variables. So a session started here opens the workspace it is given or none at all.
 function startRunner(
   apiPort: number | string,
   webPort: number | string,
@@ -194,7 +236,7 @@ function startRunner(
 ): SpawnedNode {
   started = spawnNode("scripts/dev.ts", {
     nodeArgs,
-    env: { ...env, HUBBER_PORT: String(apiPort), HUBBER_WEB_PORT: String(webPort) },
+    env: { ...workspace.env, ...env, HUBBER_PORT: String(apiPort), HUBBER_WEB_PORT: String(webPort) },
   });
   return started;
 }
@@ -249,14 +291,15 @@ function ended({ exited, stdout, stderr }: SpawnedNode, within = STOP_TIMEOUT_MS
 /**
  * How a runner ended that was expected to end by itself. What it started cannot be found
  * through it once it is gone, so its processes are looked up while it runs and kept for
- * afterEach, until the whole session has been seen: the watcher, the server it runs, and Vite.
+ * afterEach, until the whole session has been seen: the watcher, the server it runs, Vite, and
+ * the guard.
  */
 function endedByItself(runner: SpawnedNode, within?: number): Promise<Exit> {
   const pid = pidOf(runner);
   const lookUp = setInterval(() => {
     const running = descendants(pid);
     if (running.length > seen.length) seen = running;
-    if (seen.length >= 3) clearInterval(lookUp);
+    if (seen.length >= 4) clearInterval(lookUp);
   }, 10);
   return ended(runner, within).finally(() => clearInterval(lookUp));
 }
@@ -284,6 +327,16 @@ function children(pid: number): number[] {
 
 function descendants(pid: number): number[] {
   return children(pid).flatMap((child) => [child, ...descendants(child)]);
+}
+
+/** The command line of a process, or nothing when it is gone. */
+function commandOf(pid: number): string {
+  try {
+    return run("ps", ["-o", "command=", "-p", String(pid)]).trim();
+  } catch {
+    // ps exits with 1 when there is no such process.
+    return "";
+  }
 }
 
 function isAlive(pid: number): boolean {
@@ -335,6 +388,14 @@ describe("scripts/dev.ts", { timeout: TEST_TIMEOUT_MS }, () => {
 
     const health = await fetch(`${webOrigin}/api/health`);
     expect(await health.json()).toEqual({ status: "ok" });
+    // The session runs on the workspace it was handed, and the page learns of it through the proxy.
+    const openedLine = `[api] Workspace „${TEST_WORKSPACE.name}”: katalog "${workspace.dir}"`;
+    await written(session, "line about the workspace", (stdout) => stdout.includes(openedLine));
+    const opened = await fetch(`${webOrigin}/api/workspace`);
+    expect(await opened.json()).toEqual({
+      name: TEST_WORKSPACE.name,
+      endpointOrigin: new URL(TEST_WORKSPACE.endpoint).origin,
+    });
     // The API is its root and what lies below it. The answer is the API server's own for a
     // route it does not have.
     for (const root of ["/api", "/api?x=1"]) {
@@ -384,12 +445,13 @@ describe("scripts/dev.ts", { timeout: TEST_TIMEOUT_MS }, () => {
 
     // A second start on the same API port has to name the process whose end stops this session
     // as a whole: the runner's own child, not the server which that child would start again.
-    const vite = viteOf(session);
-    const [watcher] = children(pidOf(session)).filter((pid) => pid !== vite);
+    const [watcher] = children(pidOf(session)).filter((pid) => commandOf(pid).includes(" --watch "));
+    expect(watcher).toBeDefined();
     expect(busyPortMessage(apiPort, "HUBBER_PORT")).toContain(`zatrzymasz go poleceniem "kill ${watcher}"`);
   });
 
-  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  // What a terminal sends for Ctrl-C, for Ctrl-\ and when it is closed, and what "kill" sends.
+  it.each(["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const)(
     "stops what it started and exits with code 0 on %s",
     async (signal) => {
       const session = await startSession();
@@ -408,8 +470,27 @@ describe("scripts/dev.ts", { timeout: TEST_TIMEOUT_MS }, () => {
       expect(seen.filter(isAlive)).toEqual([]);
       expect(listenerOf(session.apiPort)).toBeUndefined();
       expect(listenerOf(session.webPort)).toBeUndefined();
+      // The server closed its workspace: no file of an open database is left beside the three entries.
+      expect(readdirSync(workspace.dir).sort()).toEqual(["files", "hubber.sqlite", "workspace.json"]);
     },
   );
+
+  // No handler of the runner sees this signal. What stops the servers is the guard it left behind.
+  it("leaves no server behind when it is killed outright", async () => {
+    const session = await startSession();
+    // The watcher, the server it runs, Vite, and the guard.
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    expect(seen.filter((pid) => commandOf(pid).includes("hubber-dev-guard"))).toHaveLength(1);
+
+    session.child.kill("SIGKILL");
+
+    expect(await ended(session)).toEqual({ code: null, signal: "SIGKILL" });
+    // Not at once: the servers are asked to stop, and whoever outlives its parent is cleared away
+    // by launchd a moment later.
+    await vi.waitFor(() => expect(seen.filter(isAlive)).toEqual([]), { timeout: STOP_TIMEOUT_MS, interval: 50 });
+    expect(listenerOf(session.apiPort)).toBeUndefined();
+    expect(listenerOf(session.webPort)).toBeUndefined();
+  });
 
   it("stops everything when one of the two processes dies", async () => {
     const session = await startSession();
@@ -540,6 +621,125 @@ describe("scripts/dev.ts", { timeout: TEST_TIMEOUT_MS }, () => {
       expect(listenerOf(freePort)).toBeUndefined();
     },
   );
+
+  // A server that cannot open its workspace says why and ends, while "node --watch" stays beside
+  // it and waits for a saved file. In the next two tests the runner has only the server's
+  // message to go by.
+  it.each([
+    [
+      "is not where HUBBER_WORKSPACE says",
+      () => ({ HUBBER_WORKSPACE: join(workDir, "no-workspace-here") }),
+      () =>
+        `Nie można otworzyć workspace'u: katalog "${join(workDir, "no-workspace-here")}" ze zmiennej HUBBER_WORKSPACE nie istnieje.`,
+    ],
+    [
+      "is pinned to another endpoint than the environment names",
+      () => ({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" }),
+      () =>
+        `Nie można otworzyć workspace'u „${TEST_WORKSPACE.name}”: jest przypięty do endpointu ${TEST_WORKSPACE.endpoint}, a zmienna ANTHROPIC_BASE_URL wskazuje https://api.anthropic.com.`,
+    ],
+  ])(
+    "stops at once, with the server's message and code 1, when the workspace %s",
+    async (_why, environment, refusal) => {
+      const [apiPort, webPort] = await freePorts(2);
+      const startedAt = performance.now();
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(reportStarts).href],
+        env: environment(),
+      });
+
+      expect(await endedByItself(runner)).toEqual({ code: 1, signal: null });
+      // Far below the 15 s the runner gives its servers: it did not sit out a start that cannot come.
+      expect(performance.now() - startedAt).toBeLessThan(7_500);
+      // Both servers were started: whether a workspace opens is for the API server to find out.
+      expect(runner.stderr().split(STARTED_A_SERVER)).toHaveLength(3);
+      expect(runner.stderr().split(STARTED_THE_GUARD)).toHaveLength(2);
+      expect(runner.stderr()).toContain(`[api] ${refusal()}`);
+      expect(runner.stdout()).toContain("Serwer API nie wystartował. Zatrzymuję pozostałe.");
+      expect(runner.stdout()).not.toContain(READY);
+      expect(seen.filter(isAlive)).toEqual([]);
+      expect(listenerOf(apiPort)).toBeUndefined();
+      expect(listenerOf(webPort)).toBeUndefined();
+    },
+  );
+
+  it.each([
+    [
+      "is not a full path",
+      () => ({ HUBBER_WORKSPACE: "dane/praca" }),
+      'Niepoprawna wartość HUBBER_WORKSPACE: "dane/praca". Podaj pełną ścieżkę katalogu workspace\'u (od "/" albo "~/").',
+    ],
+    [
+      // The runner of a test has no HOME, and so no default place to fall back on.
+      "names nothing and there is no HOME",
+      () => ({ HUBBER_WORKSPACE: "" }),
+      "Nie wskazano workspace'u. Ustaw zmienną HUBBER_WORKSPACE na katalog workspace'u; bez zmiennej HOME nie ma katalogu domyślnego.",
+    ],
+    [
+      // What "npm run dev" finds in an agent's shell once an export of the command before is
+      // gone: the owner's HOME, whose default place is the owner's own workspace.
+      "names nothing in the session of a coding agent, although there is a HOME",
+      () => ({ HUBBER_WORKSPACE: "", HOME: emptyHome, CLAUDECODE: "1" }),
+      "Nie wskazano workspace'u. Ustaw zmienną HUBBER_WORKSPACE na katalog workspace'u; w sesji agenta (zmienna CLAUDECODE) nie ma katalogu domyślnego.",
+    ],
+  ])("refuses to start when HUBBER_WORKSPACE %s, with code 2", async (_what, environment, message) => {
+    const [apiPort, webPort] = await freePorts(2);
+
+    const runner = startRunner(apiPort, webPort, {
+      nodeArgs: ["--import", pathToFileURL(reportStarts).href],
+      env: environment(),
+    });
+
+    expect(await endedByItself(runner)).toEqual({ code: 2, signal: null });
+    // The runner's own line and no other. A start of either server would show here, as it does
+    // in the tests above: the runner found this out before it started anything.
+    expect(runner.stderr()).toBe(`${message}\n`);
+    expect(runner.stdout()).toBe("");
+    expect(listenerOf(apiPort)).toBeUndefined();
+    expect(listenerOf(webPort)).toBeUndefined();
+    // Nothing was looked for, let alone created, under the home directory.
+    expect(readdirSync(emptyHome)).toEqual([]);
+  });
+
+  it("opens the workspace that the session of a coding agent names", async () => {
+    const session = await startSession({
+      env: { HOME: emptyHome, CLAUDECODE: "1", AI_AGENT: "claude-code_2-1-295_agent" },
+    });
+
+    const openedLine = `[api] Workspace „${TEST_WORKSPACE.name}”: katalog "${workspace.dir}"`;
+    await written(session, "line about the workspace", (stdout) => stdout.includes(openedLine));
+    expect(readdirSync(emptyHome)).toEqual([]);
+  });
+
+  it("hands the SDK's variables to the API server and keeps them from Vite", async () => {
+    // Invented, and sent nowhere: nothing in a session calls a model.
+    const sdkVariables = {
+      ANTHROPIC_API_KEY: "invented-key-for-tests",
+      ANTHROPIC_AUTH_TOKEN: "invented-token-for-tests",
+      ANTHROPIC_BASE_URL: TEST_WORKSPACE.endpoint,
+      ANTHROPIC_CUSTOM_HEADERS: "x-team: alfa",
+    };
+
+    const session = await startSession({
+      env: { ...sdkVariables, NODE_OPTIONS: `--import=${pathToFileURL(reportSdkVariables).href}` },
+    });
+    // The server's own word that it read them: the address matched its pin, and the token was found.
+    const credential = "[api] Poświadczenia: zmienna ANTHROPIC_AUTH_TOKEN.";
+    await written(session, "line about the credential", (stdout) => stdout.includes(credential));
+
+    /** What was reported under a prefix, each line once: a server can be more than one process. */
+    const reports = (prefix: string): string[] => {
+      const lines = session.stdout().split("\n");
+      return [...new Set(lines.filter((line) => line.startsWith(`${prefix}${SDK_VARIABLES}`)))];
+    };
+    const all = `${SDK_VARIABLES} ${JSON.stringify(Object.keys(sdkVariables).sort())}`;
+    // The runner was started with all four, and the API server got them from it.
+    expect(reports("")).toEqual([all]);
+    expect(reports("[api] ")).toEqual([`[api] ${all}`]);
+    // Vite got the rest of the environment, the stand-in included, and none of the four.
+    expect(reports("[web] ")).toEqual([`[web] ${SDK_VARIABLES} []`]);
+  });
 
   it("refuses to start when both variables name the same port, with code 2", async () => {
     const [port] = await freePorts(1);

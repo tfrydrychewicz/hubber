@@ -232,6 +232,50 @@ describe("runDiagnostics", () => {
     expect(report.summary.coreReady).toBe(false);
   });
 
+  // What a check quotes of an answer is far shorter than a credential can be. Here the cut falls
+  // inside the secret: cleaned only afterwards, its beginning would stay in the report.
+  it("cleans what the endpoint says with the given function before a check or an error cuts it short", async () => {
+    const secret = "planted-credential-".repeat(12);
+    const redact = (text: string) => text.replaceAll(secret, "[ukryte]");
+    const answers = [
+      // An answer that repeats the secret, which the check of a plain message quotes the beginning of.
+      Response.json({
+        id: "msg_echo",
+        type: "message",
+        role: "assistant",
+        model: "test-model",
+        content: [{ type: "text", text: `gotowe\n${secret}` }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      // A refusal that repeats it far into a long text.
+      Response.json(
+        { type: "error", error: { type: "api_error", message: `${"y".repeat(560)} sent: ${secret}.` } },
+        { status: 500 },
+      ),
+    ];
+    const client = new Anthropic({
+      apiKey: "test-key",
+      baseURL: "http://router.test",
+      fetch: async () => answers.shift() ?? Response.error(),
+      maxRetries: 0,
+    });
+
+    const report = await runDiagnostics({ client, meta: META, only: ["message", "models_list"], redact });
+
+    expect(check(report, "message")).toMatchObject({
+      status: "confirmed",
+      detail: "Model odpowiedział: „gotowe [ukryte]”.",
+    });
+    expect(check(report, "models_list")).toMatchObject({
+      status: "error",
+      detail: `${"y".repeat(560)} sent: [ukryte].`,
+      error: { message: `${"y".repeat(560)} sent: [ukryte].` },
+    });
+    expect(JSON.stringify(report)).not.toContain("planted");
+  });
+
   it("honours skip and reports progress through the callbacks", async () => {
     const started: string[] = [];
     const done: string[] = [];

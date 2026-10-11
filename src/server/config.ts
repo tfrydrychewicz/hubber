@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { EXIT_FAILURE, EXIT_USAGE } from "./exit-codes.ts";
 import { DEFAULT_API_PORT, HOST, PortError, parsePort } from "./ports.ts";
+import { locateWorkspace, type WorkspaceLocation, WorkspaceLocationError } from "./workspace/location.ts";
 
 // What scripts/dev.ts sets: the Vite dev server always runs on the loopback address.
 const DEV_ORIGIN_PATTERN = /^http:\/\/127\.0\.0\.1:\d+$/;
@@ -17,6 +18,11 @@ export class ServerConfigError extends Error {
 
 export interface ServerConfig {
   port: number;
+  /**
+   * The workspace to open: its directory, and whether HUBBER_WORKSPACE or the default named it.
+   * Only named here. Whether it exists and can be opened is found out by opening it.
+   */
+  workspace: WorkspaceLocation;
   /** Development only: the origins under which the Vite dev server can be opened. */
   devOrigins?: string[];
   /** Production only: the directory with the built web app. */
@@ -44,6 +50,16 @@ export function readServerConfig({ env, webRoot, fileExists }: ServerConfigDeps)
     throw error;
   }
 
+  // With the other settings, so that a value that cannot be used is reported before the missing
+  // build and before anything is opened. Decided from the environment alone: the disk is not touched.
+  let workspace: WorkspaceLocation;
+  try {
+    workspace = locateWorkspace(env);
+  } catch (error) {
+    if (error instanceof WorkspaceLocationError) throw new ServerConfigError(error.message, EXIT_USAGE);
+    throw error;
+  }
+
   const devOrigin = env.HUBBER_DEV_ORIGIN;
   if (devOrigin !== undefined && devOrigin !== "") {
     // The pattern alone lets through what no browser sends as an Origin: port 80, a leading zero, a port above 65535.
@@ -54,7 +70,7 @@ export function readServerConfig({ env, webRoot, fileExists }: ServerConfigDeps)
       );
     }
     // The dev server answers under both names, and a browser sends whichever the user typed.
-    return { port, devOrigins: [devOrigin, devOrigin.replace(HOST, "localhost")] };
+    return { port, workspace, devOrigins: [devOrigin, devOrigin.replace(HOST, "localhost")] };
   }
 
   if (!fileExists(join(webRoot, "index.html"))) {
@@ -63,5 +79,5 @@ export function readServerConfig({ env, webRoot, fileExists }: ServerConfigDeps)
       EXIT_FAILURE,
     );
   }
-  return { port, webRoot };
+  return { port, workspace, webRoot };
 }

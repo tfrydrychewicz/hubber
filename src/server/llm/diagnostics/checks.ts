@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { apiErrorMessage } from "./classify.ts";
 import { cacheFiller, codePdf, solidPng } from "./fixtures.ts";
-import type { CheckId, CheckOutcome } from "./types.ts";
+import type { CheckId, CheckOutcome, Redact } from "./types.ts";
 
 export interface CheckContext {
   client: Anthropic;
@@ -12,6 +12,8 @@ export interface CheckContext {
   // Filled in by the models_list check for the report
   availableModels: string[];
   sleep: (ms: number) => Promise<void>;
+  // For every text of the endpoint that a check quotes in part
+  redact: Redact;
 }
 
 export type CheckFn = (ctx: CheckContext) => Promise<CheckOutcome>;
@@ -45,8 +47,10 @@ function thinkingBlockCount(message: Anthropic.Message): number {
   return message.content.filter((block) => block.type === "thinking" || block.type === "redacted_thinking").length;
 }
 
-function preview(text: string): string {
-  const flat = text.replace(/\s+/g, " ").trim();
+// Cleaned before anything else is done to it: the answer may repeat the credential, and what is
+// left of one after the cut could not be recognised any more.
+function preview(text: string, redact: Redact): string {
+  const flat = redact(text).replace(/\s+/g, " ").trim();
   return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
 }
 
@@ -127,7 +131,7 @@ const message: CheckFn = async (ctx) => {
   if (!text) return { status: "ineffective", detail: "Odpowiedź nie zawiera tekstu." };
   return {
     status: "confirmed",
-    detail: `Model odpowiedział: „${preview(text)}”.`,
+    detail: `Model odpowiedział: „${preview(text, ctx.redact)}”.`,
     observations: {
       reportedModel: response.model,
       inputTokens: response.usage.input_tokens,
@@ -265,7 +269,10 @@ const imageInput: CheckFn = async (ctx) => {
   if (blocked) return blocked;
   const text = textOf(response);
   if (!/\bred\b|crimson|scarlet|czerwon/i.test(text)) {
-    return { status: "ineffective", detail: `Obraz nie został odczytany poprawnie. Odpowiedź: „${preview(text)}”.` };
+    return {
+      status: "ineffective",
+      detail: `Obraz nie został odczytany poprawnie. Odpowiedź: „${preview(text, ctx.redact)}”.`,
+    };
   }
   return { status: "confirmed", detail: "Model poprawnie rozpoznał kolor obrazu testowego." };
 };
@@ -356,7 +363,7 @@ const thinking: CheckFn = async (ctx) => {
     if (!(err instanceof Anthropic.BadRequestError)) throw err;
     return {
       status: "ineffective",
-      detail: `Pole thinking przyjęte, ale odesłanie historii z blokami rozumowania zostało odrzucone: ${apiErrorMessage(err)}`,
+      detail: `Pole thinking przyjęte, ale odesłanie historii z blokami rozumowania zostało odrzucone: ${apiErrorMessage(err, ctx.redact)}`,
       observations,
     };
   }
@@ -390,7 +397,10 @@ const pdfInput: CheckFn = async (ctx) => {
   if (blocked) return blocked;
   const text = textOf(response);
   if (!text.toUpperCase().includes(code)) {
-    return { status: "ineffective", detail: `Model nie odczytał treści PDF. Odpowiedź: „${preview(text)}”.` };
+    return {
+      status: "ineffective",
+      detail: `Model nie odczytał treści PDF. Odpowiedź: „${preview(text, ctx.redact)}”.`,
+    };
   }
   return { status: "confirmed", detail: "Model odczytał treść dokumentu PDF." };
 };
@@ -446,7 +456,7 @@ const structuredOutput: CheckFn = async (ctx) => {
   if ((parsed as { status?: unknown } | undefined)?.status !== "ok") {
     return {
       status: "ineffective",
-      detail: `Endpoint przyjął output_config.format, ale odpowiedź nie jest zgodna ze schematem: „${preview(text)}”.`,
+      detail: `Endpoint przyjął output_config.format, ale odpowiedź nie jest zgodna ze schematem: „${preview(text, ctx.redact)}”.`,
     };
   }
   return { status: "confirmed", detail: "Odpowiedź jest zgodna z zadanym schematem JSON." };

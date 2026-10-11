@@ -30,6 +30,9 @@ export type CheckStatus = "confirmed" | "rejected" | "ineffective" | "error" | "
 
 export type Observations = Record<string, string | number | boolean | null>;
 
+/** Takes the credentials of the run out of a text. */
+export type Redact = (text: string) => string;
+
 export interface CheckError {
   kind: "http" | "connection" | "timeout" | "other";
   message: string;

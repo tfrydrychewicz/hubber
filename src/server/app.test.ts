@@ -3,14 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HTTPException } from "hono/http-exception";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { isWorkspaceInfo } from "../shared/workspace.ts";
 import { type AppOptions, createApp } from "./app.ts";
 import { type RunningServer, startServer } from "./listen.ts";
-import { rawGet } from "./testing.ts";
+import { EndpointError, parseEndpoint } from "./llm/endpoint.ts";
+import { rawGet, TEST_WORKSPACE } from "./testing.ts";
 
 const INDEX_HTML =
   '<!doctype html><html lang="pl"><head><title>Hubber</title></head><body><div id="root"></div></body></html>';
 const OUTSIDE_MARKER = "PLIK-SPOZA-KATALOGU-WEB";
 const NOT_FOUND_BODY = { error: "not_found", message: "Nie znaleziono zasobu." };
+// Unlike the throwaway workspace, whose host is this machine's own address, this one has a name
+// and a host that are in an answer only if the workspace put them there.
+const WORK = { name: "Praca", endpoint: "https://router.corp.example/anthropic" };
+const CANNOT_SHOW_WORKSPACE =
+  "Nie można pokazać workspace'u w interfejsie: jego nazwa jest pusta albo adres endpointu nie zaczyna się od http:// lub https://.";
 const PORT = 4477;
 // app.request() sends no Host header of its own, and the guard refuses a request without one.
 const HOST_HEADER = `127.0.0.1:${PORT}`;
@@ -18,7 +25,7 @@ const HOST_HEADER = `127.0.0.1:${PORT}`;
 type App = ReturnType<typeof createApp>;
 
 function buildApp(options: Partial<AppOptions> = {}): App {
-  return createApp({ port: PORT, ...options });
+  return createApp({ port: PORT, workspace: TEST_WORKSPACE, ...options });
 }
 
 function request(app: App, path: string, init: RequestInit = {}) {
@@ -58,12 +65,146 @@ describe("API", () => {
     expect(await response.json()).toEqual({ status: "ok" });
   });
 
+  it("names the open workspace and the origin of its endpoint, and tells the browser not to keep the answer", async () => {
+    const response = await request(buildApp({ workspace: WORK }), "/api/workspace");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ name: "Praca", endpointOrigin: "https://router.corp.example" });
+  });
+
+  it.each([
+    ["https://api.anthropic.com", "https://api.anthropic.com"],
+    ["https://api.anthropic.com/", "https://api.anthropic.com"],
+    ["https://Router.Corp.Example:443/v1", "https://router.corp.example"],
+    ["https://router.corp.example:8443/v1", "https://router.corp.example:8443"],
+    ["http://127.0.0.1:8080/v1/messages", "http://127.0.0.1:8080"],
+    // The second letter is a Cyrillic "o". On screen the two hosts look alike; spelled this way they do not.
+    ["https://r\u043Euter.corp.example/anthropic", "https://xn--ruter-jye.corp.example"],
+    ["http://[::1]:8080/v1", "http://[::1]:8080"],
+    // No real host has an asterisk, but such an address can be pinned. Chromium would write "%2A" here.
+    ["https://ex*ample.example/llm", "https://ex*ample.example"],
+    // The full-width asterisk, which the parser turns into the plain one.
+    ["https://ex\uFF0Aample.example/llm", "https://ex*ample.example"],
+  ])("shows %s as %s", async (endpoint, endpointOrigin) => {
+    const response = await request(buildApp({ workspace: { name: "Praca", endpoint } }), "/api/workspace");
+
+    expect(await response.json()).toEqual({ name: "Praca", endpointOrigin });
+  });
+
+  // createApp() refuses a workspace whose answer the page would not accept. An address that
+  // could be pinned and then not shown would be a workspace that is created without complaint
+  // and never starts. So every host that the pin lets through has to come out as an origin that
+  // the page's check accepts: each visible ASCII character at the start, in the middle and at
+  // the end of a host name.
+  it("can be built for every host that an address can be pinned with", async () => {
+    const pinned: Array<{ href: string; origin: string }> = [];
+    for (let code = 0x21; code <= 0x7e; code++) {
+      const character = String.fromCharCode(code);
+      for (const host of [`${character}example.example`, `ex${character}ample.example`, `example${character}`]) {
+        try {
+          pinned.push(parseEndpoint(`https://${host}/llm`));
+        } catch (error) {
+          if (!(error instanceof EndpointError)) throw error;
+        }
+      }
+    }
+    // The control: the loop below has something to go through.
+    expect(pinned.length).toBeGreaterThan(100);
+
+    for (const { href, origin } of pinned) {
+      const response = await request(buildApp({ workspace: { name: "Praca", endpoint: href } }), "/api/workspace");
+      const body: unknown = await response.json();
+
+      expect(body).toEqual({ name: "Praca", endpointOrigin: origin });
+      expect(isWorkspaceInfo(body), origin).toBe(true);
+    }
+  });
+
+  // The same for a name from another alphabet, of which the parser makes punycode or, for a
+  // character that is a variant of an ASCII one, that ASCII character.
+  it("makes an origin that the page accepts of every host name outside ASCII that can be pinned", () => {
+    const refused: string[] = [];
+    let pinned = 0;
+    for (let code = 0x80; code <= 0xffff; code++) {
+      // Half of a surrogate pair is no character.
+      if (code >= 0xd800 && code <= 0xdfff) continue;
+      const character = String.fromCharCode(code);
+      for (const host of [`${character}.example`, `a${character}b.example`]) {
+        let origin: string;
+        try {
+          origin = parseEndpoint(`https://${host}/llm`).origin;
+        } catch (error) {
+          if (!(error instanceof EndpointError)) throw error;
+          continue;
+        }
+        pinned += 1;
+        if (!isWorkspaceInfo({ name: "Praca", endpointOrigin: origin })) refused.push(`${host} -> ${origin}`);
+      }
+    }
+
+    expect(pinned).toBeGreaterThan(50_000);
+    expect(refused).toEqual([]);
+  });
+
+  it("passes on nothing but the name and the origin, whatever else the workspace and its address carry", async () => {
+    // What the server knows about a workspace will grow, and an address has room for a secret
+    // in four places. The interface gets the two things it shows.
+    const opened = {
+      name: "Praca",
+      endpoint: "https://uzytkownik:haslo-123@router.corp.example/konto-456/anthropic?api-key=klucz-789#token-012",
+      directory: "/Users/someone/Hubber/praca",
+      credentialSource: "plik /Users/someone/.config/hubber/token",
+      authToken: "token-345",
+    };
+
+    const response = await request(buildApp({ workspace: opened }), "/api/workspace");
+    const text = await response.text();
+
+    expect(JSON.parse(text)).toEqual({ name: "Praca", endpointOrigin: "https://router.corp.example" });
+    expect(text).not.toMatch(/uzytkownik|haslo-123|konto-456|klucz-789|token-012|token-345|someone/);
+  });
+
+  it("does not tell a page on another site which workspace is open", async () => {
+    const response = await request(buildApp({ workspace: WORK }), "/api/workspace", {
+      headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" },
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(403);
+    expect(JSON.parse(text)).toMatchObject({ error: "forbidden_origin" });
+    expect(text).not.toContain("Praca");
+    expect(text).not.toContain("router.corp.example");
+  });
+
+  it.each([
+    ["has no scheme", "router.corp.example/haslo-123"],
+    // The parser reads such an address as one whose scheme is the host name.
+    ["has a port and no scheme", "router.corp.example:8443/haslo-123"],
+    ["is not a web address", "ftp://haslo-123@router.corp.example"],
+    ["is empty", ""],
+  ])("cannot be built for a workspace whose endpoint %s, and does not repeat the address", (_label, endpoint) => {
+    const build = () => buildApp({ workspace: { name: "Praca", endpoint } });
+
+    expect(build).toThrow(CANNOT_SHOW_WORKSPACE);
+    expect(build).not.toThrow(/haslo-123|router\.corp\.example/);
+  });
+
+  it("cannot be built for a workspace without a name", () => {
+    expect(() => buildApp({ workspace: { name: " ", endpoint: "https://router.corp.example" } })).toThrow(
+      CANNOT_SHOW_WORKSPACE,
+    );
+  });
+
   it.each([
     ["GET", "/api"],
     ["GET", "/api/"],
     ["GET", "/api/nie-ma"],
     ["GET", "/api/health/extra"],
     ["POST", "/api/health"],
+    ["GET", "/api/workspace/extra"],
+    ["POST", "/api/workspace"],
     ["DELETE", "/api/nie-ma"],
   ])("answers %s %s with a JSON 404", async (method, path) => {
     const response = await request(buildApp({ webRoot }), path, { method });
@@ -368,7 +509,7 @@ describe("path traversal", () => {
   let server: RunningServer;
 
   beforeAll(async () => {
-    server = await startServer({ port: 0, app: ({ port }) => createApp({ port, webRoot }) });
+    server = await startServer({ port: 0, app: ({ port }) => createApp({ port, webRoot, workspace: TEST_WORKSPACE }) });
   });
 
   afterAll(async () => {

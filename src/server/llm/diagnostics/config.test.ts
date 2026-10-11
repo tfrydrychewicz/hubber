@@ -73,6 +73,41 @@ describe("resolveConfig", () => {
     expect(() => resolve({}, { env: { ANTHROPIC_BASE_URL: "ftp://router.corp.example" } })).toThrow(ConfigError);
   });
 
+  // The variable may hold a password, or a key that was meant for another variable.
+  it.each([
+    [
+      "an address with a password and a port that cannot be",
+      "https://svc:planted-password-9911@router.corp.example:99999/llm",
+      "ANTHROPIC_BASE_URL nie jest poprawnym adresem. Podaj pełny adres, na przykład https://router.corp.example/llm.",
+    ],
+    [
+      "a key in the place of an address",
+      "sk-planted-key-in-the-wrong-variable",
+      "ANTHROPIC_BASE_URL nie jest poprawnym adresem. Podaj pełny adres, na przykład https://router.corp.example/llm.",
+    ],
+    [
+      "an address of another scheme, with a password",
+      "ftp://svc:planted-password-9911@router.corp.example/llm",
+      "ANTHROPIC_BASE_URL musi zaczynać się od http:// lub https://.",
+    ],
+  ])("does not repeat a base URL that it rejects: %s", (_case, value, message) => {
+    const rejection = (setup: Parameters<typeof resolve>[1], options: ConfigOptions = {}) => {
+      try {
+        resolve(options, setup);
+      } catch (error) {
+        if (error instanceof ConfigError) return error.message;
+        throw error;
+      }
+      throw new Error("resolveConfig did not throw");
+    };
+
+    expect(rejection({ env: { ANTHROPIC_BASE_URL: value } })).toBe(message);
+    // From a settings file as well.
+    expect(rejection({ settings: { env: { ANTHROPIC_BASE_URL: value } } }, { claudeSettingsPath: SETTINGS_PATH })).toBe(
+      message,
+    );
+  });
+
   it("takes the connection from the settings file alone, ignoring the shell", () => {
     const { config } = withSettings(
       { env: { ANTHROPIC_BASE_URL: "https://router.corp.example", ANTHROPIC_AUTH_TOKEN: "corp-token" } },

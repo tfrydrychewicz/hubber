@@ -9,7 +9,10 @@ import type { Readable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { busyPortMessage, isBusyPortMessage } from "../src/server/busy-port.ts";
 import { EXIT_FAILURE, EXIT_USAGE } from "../src/server/exit-codes.ts";
+import { withoutSdkVariables } from "../src/server/llm/credentials/scrub-env.ts";
 import { DEFAULT_API_PORT, DEFAULT_WEB_PORT, HOST, PortError, parsePort } from "../src/server/ports.ts";
+import { isWorkspaceRefusal } from "../src/server/workspace/errors.ts";
+import { locateWorkspace, WorkspaceLocationError } from "../src/server/workspace/location.ts";
 
 const GRACE_MS = 5000;
 const READY_TIMEOUT_MS = 15_000;
@@ -46,6 +49,7 @@ async function waitUntil(ready: () => boolean): Promise<boolean> {
   return false;
 }
 
+/** Starts one of the two servers. Its environment is what the caller hands in, not this script's own. */
 function start(
   name: string,
   color: number,
@@ -60,7 +64,7 @@ function start(
     // the terminal's Ctrl-C arrives only here, so this script alone decides how shutdown goes.
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...env, ...(useColor && { FORCE_COLOR: "1" }) },
+    env: { ...env, ...(useColor && { FORCE_COLOR: "1" }) },
   });
   const prefix = paint(color, `[${name}]`);
   const forward = (source: Readable, target: NodeJS.WriteStream) =>
@@ -95,6 +99,41 @@ function start(
     say(`Proces ${name} zakończył się nieoczekiwanie (${signal ?? `kod ${code}`}). Zatrzymuję pozostałe.`);
     void stop(EXIT_FAILURE);
   });
+}
+
+// What the guard runs: it waits for a line that never comes, and when its input closes instead,
+// it asks the process groups named in its arguments to stop.
+const GUARD = 'read -r _ || kill -s TERM -- "$@"';
+
+/**
+ * Leaves someone behind to stop the servers if this script is killed outright (SIGKILL, a crash
+ * of Node itself): no handler here sees that, and the servers are in process groups of their
+ * own, so they would stay, with both ports and the workspace held open. The guard is a shell
+ * that reads from a pipe which only this script holds the other end of. The pipe closes when
+ * this script is gone, however it went, and the guard then asks the servers to stop, the way
+ * stop() does. On an orderly stop the guard is ended with the servers, before it does anything.
+ */
+function leaveGuard(): void {
+  const servers = [...groups].map((group) => `-${group}`);
+  const guard = spawn("/bin/sh", ["-c", GUARD, "hubber-dev-guard", ...servers], {
+    // A group of its own, like the servers: what ends this script from a terminal must not end
+    // the guard with it.
+    detached: true,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  // Without the guard the session works as before; only the cover for an outright kill is missing.
+  guard.once("error", () => {});
+  guard.stdin.on("error", () => {});
+  const group = guard.pid;
+  if (group !== undefined) groups.add(group);
+  closed.push(
+    new Promise((resolve) => {
+      guard.once("close", () => {
+        if (group !== undefined) groups.delete(group);
+        resolve();
+      });
+    }),
+  );
 }
 
 function signalGroups(signal: NodeJS.Signals): void {
@@ -142,6 +181,16 @@ try {
 if (apiPort === webPort) {
   fail(`HUBBER_PORT i HUBBER_WEB_PORT wskazują ten sam port (${apiPort}). Ustaw dwa różne.`, EXIT_USAGE);
 }
+// A place for the workspace that cannot be used as given is a mistake in the settings, like a
+// bad port: reported here, in the server's own words, before anything is started. Only the
+// environment is read. Whether a workspace is there and can be opened is for the server to find
+// out, and onApiLine() acts on its answer.
+try {
+  locateWorkspace(process.env);
+} catch (err) {
+  if (err instanceof WorkspaceLocationError) fail(err.message, EXIT_USAGE);
+  throw err;
+}
 
 // Checked here because neither child reports a busy port well: Vite answers in English, and
 // "node --watch" keeps waiting for a file change after the server has given up. Both ports are
@@ -151,7 +200,9 @@ if (!(await isPortFree(apiPort))) busy.push(busyPortMessage(apiPort, "HUBBER_POR
 if (!(await isPortFree(webPort))) busy.push(busyPortMessage(webPort, "HUBBER_WEB_PORT"));
 if (busy.length > 0) fail(busy.join("\n"), EXIT_FAILURE);
 
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => void stop(0));
+// SIGQUIT is what Ctrl-\ sends. Left to Node it ends this script at once, and the servers, which
+// are in process groups of their own, would stay behind with the ports and the workspace.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, () => void stop(0));
 // Covers exits that bypass stop(), such as an uncaught exception.
 process.on("exit", () => signalGroups("SIGKILL"));
 
@@ -166,8 +217,9 @@ const apiReadyLine = `API nasłuchuje pod adresem http://${HOST}:${apiPort}.`;
 let apiUp = false;
 function onApiLine(line: string): void {
   if (line.includes(apiReadyLine)) apiUp = true;
-  // No saved file frees a port, so waiting for the next restart would be waiting for nothing.
-  if (isBusyPortMessage(line, apiPort) && !stopping) {
+  // No saved file frees a port or makes a workspace open, so waiting for the next restart would
+  // be waiting for nothing.
+  if ((isBusyPortMessage(line, apiPort) || isWorkspaceRefusal(line)) && !stopping) {
     say("Serwer API nie wystartował. Zatrzymuję pozostałe.");
     void stop(EXIT_FAILURE);
   }
@@ -192,12 +244,16 @@ start(
   "api",
   36,
   ["--watch", "--watch-preserve-output", "src/server/main.ts"],
-  { ...ports, HUBBER_DEV_ORIGIN: webOrigin },
+  { ...process.env, ...ports, HUBBER_DEV_ORIGIN: webOrigin },
   onApiLine,
 );
 // When someone else has taken the web port since the check above, Vite exits (strictPort), and
 // the end of a child stops everything.
-start("web", 35, [viteCli], ports, onWebLine);
+// Vite gets the environment without the SDK's variables: the address of the endpoint and its
+// credential are for the server alone, and Vite runs the plugins of the build and whatever
+// those load.
+start("web", 35, [viteCli], { ...withoutSdkVariables(process.env), ...ports }, onWebLine);
+leaveGuard();
 
 const [apiReady, webReady] = await Promise.all([waitUntil(() => apiUp), waitUntil(() => webUp)]);
 if (!stopping) {

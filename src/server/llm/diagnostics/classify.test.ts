@@ -68,6 +68,47 @@ describe("classifyError", () => {
     expect(error.hint).toContain("--timeout");
   });
 
+  it.each([301, 302, 303, 307, 308])("explains that a redirect (%i) is not followed", (status) => {
+    const { status: outcome, error } = classifyError(apiError(status, {}));
+
+    expect(outcome).toBe("error");
+    expect(error).toMatchObject({ kind: "http", httpStatus: status });
+    expect(error.hint).toBe(
+      "Endpoint odpowiedział przekierowaniem. Diagnostyka, tak jak aplikacja, nie podąża za przekierowaniami, bo wysłałaby dane i poświadczenia pod inny adres. Sprawdź adres w ANTHROPIC_BASE_URL.",
+    );
+  });
+
+  // The secret is longer than what is left of the limit after the text in front of it, so the
+  // cut falls inside it: cleaned only after the cut, its beginning would stay.
+  describe("with a function that takes the credentials out", () => {
+    const SECRET = "planted-credential-".repeat(12);
+    const redact = (text: string) => text.replaceAll(SECRET, "[ukryte]");
+    const long = `${"y".repeat(560)} refused: ${SECRET} is not valid`;
+    const cleaned = `${"y".repeat(560)} refused: [ukryte] is not valid`;
+
+    it("cleans the text of an HTTP error before it cuts it short", () => {
+      const { error } = classifyError(apiError(401, anthropicBody("authentication_error", long)), redact);
+
+      expect(error.message).toBe(cleaned);
+      expect(error.message).not.toContain("planted");
+    });
+
+    it("cleans the text of a connection error and of any other error before it cuts it short", () => {
+      const connection = classifyError(new Anthropic.APIConnectionError({ message: long }), redact);
+      // As when the SDK cannot send a header value: its message quotes the value.
+      const other = classifyError(new Error(long), redact);
+
+      expect(connection.error).toMatchObject({ kind: "connection", message: cleaned });
+      expect(other.error).toEqual({ kind: "other", message: cleaned });
+    });
+
+    it("still cuts short what is long after the cleaning", () => {
+      const { error } = classifyError(new Error(`${SECRET}${"x".repeat(5_000)}`), redact);
+
+      expect(error.message).toBe(`[ukryte]${"x".repeat(592)}…`);
+    });
+  });
+
   it("falls back to the plain message for anything else", () => {
     expect(classifyError(new Error("Could not resolve authentication method"))).toEqual({
       status: "error",
@@ -86,6 +127,15 @@ describe("apiErrorMessage", () => {
 
   it("falls back to the SDK message when the body has no message", () => {
     expect(apiErrorMessage(apiError(400, { detail: [{ loc: ["body", "strict"] }] }))).toContain("strict");
+  });
+
+  it("cleans the message with the given function before it cuts it short", () => {
+    const secret = "planted-credential-".repeat(12);
+    const error = apiError(400, anthropicBody("invalid_request_error", `${"y".repeat(560)} ${secret} was sent`));
+
+    const message = apiErrorMessage(error, (text) => text.replaceAll(secret, "[ukryte]"));
+
+    expect(message).toBe(`${"y".repeat(560)} [ukryte] was sent`);
   });
 
   it("truncates very long messages", () => {

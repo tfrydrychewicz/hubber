@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import { getRequestListener } from "@hono/node-server";
@@ -15,9 +15,26 @@ const CLIENT_ERROR_STATUS = new Map([
   ["HPE_CHUNK_EXTENSIONS_OVERFLOW", "413 Payload Too Large"],
   ["ERR_HTTP_REQUEST_TIMEOUT", "408 Request Timeout"],
 ]);
-const SECURITY_HEADER_LINES = Object.entries(securityHeaderValues())
-  .map(([name, value]) => `${name}: ${value}\r\n`)
-  .join("");
+const SECURITY_HEADERS = Object.entries(securityHeaderValues());
+const SECURITY_HEADER_LINES = SECURITY_HEADERS.map(([name, value]) => `${name}: ${value}\r\n`).join("");
+
+/**
+ * The response to every request that Node has parsed. It starts out with the headers that the
+ * app puts on its own answers, because not every answer comes from the app. Node itself refuses
+ * an HTTP/1.1 request without a Host header and one with an expectation it does not know. The
+ * adapter refuses a request whose Host header or address it cannot make a URL of, and it answers
+ * in place of an app that failed outright. Each of them writes a status and nothing else, so
+ * the headers have to be there before anyone knows who will answer. Whoever writes the head of
+ * the response replaces the ones it sets itself, as the app does with all of them.
+ */
+class ResponseWithSecurityHeaders extends ServerResponse {
+  // A rest parameter, so that whatever Node hands its own class reaches it, the options that
+  // the type declarations do not list included.
+  constructor(...args: ConstructorParameters<typeof ServerResponse>) {
+    super(...args);
+    for (const [name, value] of SECURITY_HEADERS) this.setHeader(name, value);
+  }
+}
 
 export interface FetchApp {
   fetch: Parameters<typeof getRequestListener>[0];
@@ -74,7 +91,7 @@ export function startServer({
   port,
   closeGraceMs = DEFAULT_CLOSE_GRACE_MS,
 }: StartServerOptions): Promise<RunningServer> {
-  const server = createServer().on("clientError", answerClientError);
+  const server = createServer({ ServerResponse: ResponseWithSecurityHeaders }).on("clientError", answerClientError);
 
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {

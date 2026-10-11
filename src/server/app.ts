@@ -6,6 +6,7 @@ import { getMimeType } from "hono/utils/mime";
 import { getPath } from "hono/utils/url";
 import { isApiPath } from "../shared/api.ts";
 import { HEALTH_PATH, type HealthResponse } from "../shared/health.ts";
+import { isWorkspaceInfo, WORKSPACE_PATH, type WorkspaceInfo } from "../shared/workspace.ts";
 import { localGuard } from "./local-guard.ts";
 import { securityHeaders } from "./security-headers.ts";
 
@@ -19,6 +20,11 @@ export interface AppOptions {
    * API is served, as in development.
    */
   webRoot?: string;
+  /**
+   * The workspace this process has opened: its name and the address it is pinned to, as the
+   * workspace stores it. The server never runs without one.
+   */
+  workspace: { name: string; endpoint: string };
 }
 
 // Vite writes every content-hashed file into this directory (build.assetsDir).
@@ -60,6 +66,23 @@ function readWebApp(root: string): Map<string, WebFile> {
   return files;
 }
 
+// The one place where what the server knows about the workspace becomes what the browser may see.
+// Field by field, and of the endpoint the origin alone: an address can carry a credential or an
+// account number in its user info, its path and its query, and the page shows this all the time.
+function workspaceInfo({ name, endpoint }: AppOptions["workspace"]): WorkspaceInfo {
+  const info = { name, endpointOrigin: URL.canParse(endpoint) ? new URL(endpoint).origin : "" };
+  // Checked with the validator that the page applies, so the server cannot start with an answer
+  // that the page would refuse. That holds in every browser, because the validator reads the text
+  // as it is and asks no URL parser, and the parsers do not spell every host as this one does.
+  // The message leaves the address out: it is not known to be harmless.
+  if (!isWorkspaceInfo(info)) {
+    throw new Error(
+      "Nie można pokazać workspace'u w interfejsie: jego nazwa jest pusta albo adres endpointu nie zaczyna się od http:// lub https://.",
+    );
+  }
+  return info;
+}
+
 export function createApp(options: AppOptions) {
   const base = new Hono({
     getPath: (request) => getPath(request).replace(LINE_TERMINATORS, encodeURIComponent),
@@ -99,7 +122,9 @@ export function createApp(options: AppOptions) {
   });
 
   const health: HealthResponse = { status: "ok" };
-  const app = base.get(HEALTH_PATH, (c) => c.json(health));
+  // The workspace cannot change while the process runs, so this answer, too, is built once.
+  const workspace = workspaceInfo(options.workspace);
+  const app = base.get(HEALTH_PATH, (c) => c.json(health)).get(WORKSPACE_PATH, (c) => c.json(workspace));
 
   if (options.webRoot !== undefined) {
     const files = readWebApp(options.webRoot);

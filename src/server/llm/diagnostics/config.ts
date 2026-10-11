@@ -82,15 +82,19 @@ function parseHeaders(raw: string | undefined): Record<string, string> {
   return headers;
 }
 
+// Neither message repeats the value: what stands in the variable may hold a password, or be a key
+// that was put into the wrong variable.
 function normalizeEndpoint(baseUrl: string): string {
   let url: URL;
   try {
     url = new URL(baseUrl);
   } catch {
-    throw new ConfigError(`ANTHROPIC_BASE_URL nie jest poprawnym adresem: ${baseUrl}`);
+    throw new ConfigError(
+      "ANTHROPIC_BASE_URL nie jest poprawnym adresem. Podaj pełny adres, na przykład https://router.corp.example/llm.",
+    );
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new ConfigError(`ANTHROPIC_BASE_URL musi zaczynać się od http:// lub https://: ${baseUrl}`);
+    throw new ConfigError("ANTHROPIC_BASE_URL musi zaczynać się od http:// lub https://.");
   }
   // Drops query strings and any credentials embedded in the URL.
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;

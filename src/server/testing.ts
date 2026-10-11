@@ -5,9 +5,19 @@ import { once } from "node:events";
 import { type AddressInfo, connect, createServer } from "node:net";
 import { join, resolve } from "node:path";
 import type { Readable } from "node:stream";
+import type { AppOptions } from "./app.ts";
 import { HOST } from "./ports.ts";
 
 const REPO_ROOT = join(import.meta.dirname, "../..");
+
+/**
+ * The throwaway workspace of every test and of the end-to-end run: its name and the address it
+ * is pinned to. The address is this machine's, and nothing listens on port 9 of the loopback
+ * address: a call that slips through is a connection that the system refuses at once, and
+ * nothing can leave the machine. The path is there so that a test can show that the page gets
+ * the origin and nothing more.
+ */
+export const TEST_WORKSPACE: AppOptions["workspace"] = { name: "Testowy", endpoint: "http://127.0.0.1:9/llm" };
 
 export interface Exit {
   code: number | null;

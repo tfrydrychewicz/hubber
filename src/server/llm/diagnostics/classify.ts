@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { CheckError } from "./types.ts";
+import type { CheckError, Redact } from "./types.ts";
 
 const MAX_MESSAGE_LENGTH = 600;
 
@@ -23,8 +23,13 @@ function causeCode(err: unknown): string | undefined {
   return undefined;
 }
 
-function truncate(text: string): string {
-  return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+const asItIs: Redact = (text) => text;
+
+// Cleaned first and cut afterwards. An endpoint may repeat the credential it was sent, and a
+// cut through it would leave a part that no later cleaning can recognise.
+function shorten(text: string, redact: Redact): string {
+  const cleaned = redact(text);
+  return cleaned.length > MAX_MESSAGE_LENGTH ? `${cleaned.slice(0, MAX_MESSAGE_LENGTH)}…` : cleaned;
 }
 
 /**
@@ -32,10 +37,10 @@ function truncate(text: string): string {
  * embeds the whole JSON body, which buries the one sentence that matters.
  * Gateways that wrap errors in their own envelope fall back to that form.
  */
-export function apiErrorMessage(err: InstanceType<typeof Anthropic.APIError>): string {
+export function apiErrorMessage(err: InstanceType<typeof Anthropic.APIError>, redact: Redact = asItIs): string {
   const body = err.error as { error?: { message?: unknown }; message?: unknown } | undefined;
   const text = body?.error?.message ?? body?.message;
-  return truncate(typeof text === "string" && text ? text : err.message);
+  return shorten(typeof text === "string" && text ? text : err.message, redact);
 }
 
 function connectionHint(code: string | undefined): string {
@@ -49,6 +54,9 @@ function connectionHint(code: string | undefined): string {
 }
 
 function httpHint(status: number): string | undefined {
+  if (status >= 300 && status < 400) {
+    return "Endpoint odpowiedział przekierowaniem. Diagnostyka, tak jak aplikacja, nie podąża za przekierowaniami, bo wysłałaby dane i poświadczenia pod inny adres. Sprawdź adres w ANTHROPIC_BASE_URL.";
+  }
   switch (status) {
     case 401:
       return "Endpoint nie przyjął poświadczeń. Sprawdź token lub klucz i sposób jego przekazania.";
@@ -75,7 +83,7 @@ export interface ClassifiedError {
  * refused this particular request shape; everything else says nothing about
  * the feature under test.
  */
-export function classifyError(err: unknown): ClassifiedError {
+export function classifyError(err: unknown, redact: Redact = asItIs): ClassifiedError {
   if (err instanceof Anthropic.APIConnectionTimeoutError) {
     return {
       status: "error",
@@ -92,7 +100,7 @@ export function classifyError(err: unknown): ClassifiedError {
       status: "error",
       error: {
         kind: "connection",
-        message: truncate(code ? `${err.message} (${code})` : err.message),
+        message: shorten(code ? `${err.message} (${code})` : err.message, redact),
         hint: connectionHint(code),
       },
     };
@@ -102,7 +110,7 @@ export function classifyError(err: unknown): ClassifiedError {
     const error: CheckError = {
       kind: "http",
       httpStatus: err.status,
-      message: apiErrorMessage(err),
+      message: apiErrorMessage(err, redact),
     };
     if (err.type) error.type = err.type;
     if (err.requestID) error.requestId = err.requestID;
@@ -111,5 +119,5 @@ export function classifyError(err: unknown): ClassifiedError {
     return { status: rejected ? "rejected" : "error", error };
   }
   const message = err instanceof Error ? err.message : String(err);
-  return { status: "error", error: { kind: "other", message: truncate(message) } };
+  return { status: "error", error: { kind: "other", message: shorten(message, redact) } };
 }

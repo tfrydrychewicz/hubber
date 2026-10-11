@@ -1,11 +1,12 @@
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createShutdown } from "./shutdown.ts";
 import { freePorts, type SpawnedNode, type SpawnNodeOptions, spawnNode } from "./testing.ts";
+import { createTestWorkspace, type TestWorkspace } from "./workspace/testing.ts";
 
 const DEADLINE_MS = 3_000;
 const START_TIMEOUT_MS = 10_000;
@@ -95,8 +96,11 @@ describe("the deadline in a real process", { timeout: START_TIMEOUT_MS + 5_000 }
   let workDir: string;
   let hungCloseScript: string;
   let closeNeverEnds: string;
+  // The server opens no other workspace: the environment it is started with names this one alone.
+  let workspace: TestWorkspace;
 
   beforeAll(() => {
+    workspace = createTestWorkspace();
     workDir = mkdtempSync(join(tmpdir(), "hubber-shutdown-"));
     hungCloseScript = join(workDir, "hung-close.mjs");
     writeFileSync(hungCloseScript, HUNG_CLOSE_SCRIPT);
@@ -105,6 +109,7 @@ describe("the deadline in a real process", { timeout: START_TIMEOUT_MS + 5_000 }
   });
 
   afterAll(() => {
+    workspace.remove();
     rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -131,7 +136,7 @@ describe("the deadline in a real process", { timeout: START_TIMEOUT_MS + 5_000 }
     const server = start("src/server/main.ts", {
       nodeArgs: ["--import", pathToFileURL(closeNeverEnds).href],
       // Any allowed development origin will do: with one, the server needs no built web app.
-      env: { HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: "http://127.0.0.1:5173" },
+      env: { ...workspace.env, HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: "http://127.0.0.1:5173" },
     });
     await vi.waitFor(
       () => {
@@ -148,5 +153,8 @@ describe("the deadline in a real process", { timeout: START_TIMEOUT_MS + 5_000 }
     // The deadline is three seconds. The same code any earlier would come from a crash.
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(2_900);
     expect(server.stdout()).toContain("Zamykanie serwera…");
+    // The database is closed only after the server has closed, so that no request in flight
+    // loses it. Here the server never got that far, and the write-ahead log is still beside it.
+    expect(readdirSync(workspace.dir)).toContain("hubber.sqlite-wal");
   });
 });

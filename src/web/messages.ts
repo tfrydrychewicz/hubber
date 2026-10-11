@@ -7,4 +7,12 @@ export const messages = {
     success: "Serwer działa",
     error: "Brak połączenia z serwerem",
   },
+  workspace: {
+    // The accessible name of the indicator; the two labels below are what is on screen.
+    label: "Aktywny workspace",
+    name: "Workspace",
+    endpoint: "Endpoint",
+    pending: "Sprawdzam workspace…",
+    error: "Nie udało się odczytać workspace'u",
+  },
 } as const;

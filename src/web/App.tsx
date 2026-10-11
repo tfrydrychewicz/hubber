@@ -1,10 +1,11 @@
 import { type QueryStatus, useQuery } from "@tanstack/react-query";
-import { HEALTH_PATH, type HealthResponse, isHealthResponse } from "../shared/health.ts";
+import { HEALTH_PATH, isHealthResponse } from "../shared/health.ts";
+import { getJson } from "./get-json.ts";
 import { messages } from "./messages.ts";
+import { WorkspaceIndicator } from "./WorkspaceIndicator.tsx";
 
-// How often the server is asked, and how long it gets to answer.
+// How often the server is asked.
 const HEALTH_POLL_MS = 5_000;
-const HEALTH_TIMEOUT_MS = 3_000;
 
 const DOT_CLASS: Record<QueryStatus, string> = {
   pending: "motion-safe:animate-pulse bg-zinc-400",
@@ -12,39 +13,12 @@ const DOT_CLASS: Record<QueryStatus, string> = {
   error: "bg-red-500",
 };
 
-// The query's abort signal is left unread on purpose. Once a query function reads it, TanStack
-// Query aborts the request when the last component using the query unmounts, and in development
-// React's StrictMode unmounts every component right after its first mount: each page load would
-// begin with a cancelled request. Unread, the remount joins the request already under way, and
-// the deadline below is what bounds it.
-async function fetchHealth(): Promise<HealthResponse> {
-  // A server that is suspended or stuck still accepts the connection. Without a deadline the
-  // request stays pending for good, the label never changes and no further check is started.
-  const deadline = new AbortController();
-  const timer = setTimeout(
-    () => deadline.abort(new Error(`GET ${HEALTH_PATH} timed out after ${HEALTH_TIMEOUT_MS} ms`)),
-    HEALTH_TIMEOUT_MS,
-  );
-  try {
-    const response = await fetch(HEALTH_PATH, { signal: deadline.signal });
-    if (!response.ok) throw new Error(`GET ${HEALTH_PATH} returned ${response.status}`);
-    const body: unknown = await response.json();
-    if (!isHealthResponse(body)) throw new Error(`GET ${HEALTH_PATH} returned an unexpected body`);
-    return body;
-  } catch (error) {
-    // WebKit rejects an aborted fetch with an AbortError of its own, not with the reason given to abort().
-    throw deadline.signal.aborted ? deadline.signal.reason : error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 export function App() {
   // Polled because the label reads as a statement about now; without it the answer is as old
   // as the last time the tab was shown. No retries: the next poll is the retry.
   const { status, errorUpdatedAt } = useQuery({
     queryKey: ["health"],
-    queryFn: fetchHealth,
+    queryFn: () => getJson(HEALTH_PATH, isHealthResponse),
     refetchInterval: HEALTH_POLL_MS,
     retry: false,
   });
@@ -60,6 +34,7 @@ export function App() {
           <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-full ${DOT_CLASS[shown]}`} />
           {messages.health[shown]}
         </p>
+        <WorkspaceIndicator />
       </section>
     </main>
   );

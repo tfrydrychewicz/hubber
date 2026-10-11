@@ -6,3 +6,10 @@
 export const EXIT_FAILURE = 1;
 /** A setting cannot be used as given: a variable or an option with a bad value. Nothing was started. */
 export const EXIT_USAGE = 2;
+/**
+ * The workspace stayed closed because of its pin: the endpoint named by the environment is not
+ * the one the workspace was created for, or its configuration file and its database name
+ * different ones. A code of its own, so that a test or a wrapper can tell this refusal from a
+ * mistyped setting and from every other failed start.
+ */
+export const EXIT_PIN = 3;

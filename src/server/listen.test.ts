@@ -3,7 +3,7 @@ import { Agent, createServer, get, type Server, type ServerOptions } from "node:
 import { type AddressInfo, connect, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { Hono } from "hono";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.ts";
 import {
   answerClientError,
@@ -14,6 +14,7 @@ import {
   startServer,
 } from "./listen.ts";
 import { securityHeaderValues } from "./security-headers.ts";
+import { TEST_WORKSPACE } from "./testing.ts";
 
 const CONNECT_TIMEOUT_MS = 1_000;
 // Node reads this much of a request line with its headers, and of the extensions of a chunk.
@@ -32,7 +33,11 @@ const nodeServers: Server[] = [];
 const sockets: Socket[] = [];
 
 async function start(options: Partial<StartServerOptions> = {}): Promise<RunningServer> {
-  const server = await startServer({ app: ({ port }) => createApp({ port }), port: 0, ...options });
+  const server = await startServer({
+    app: ({ port }) => createApp({ port, workspace: TEST_WORKSPACE }),
+    port: 0,
+    ...options,
+  });
   servers.push(server);
   return server;
 }
@@ -44,6 +49,7 @@ function keepAliveAgent(): Agent {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const agent of agents.splice(0)) agent.destroy();
   for (const socket of sockets.splice(0)) socket.destroy();
   for (const server of nodeServers.splice(0)) server.close().closeAllConnections();
@@ -124,7 +130,7 @@ describe("startServer", () => {
   it("rejects with PortInUseError when the port is taken", async () => {
     const first = await start();
 
-    const second = startServer({ app: createApp({ port: first.port }), port: first.port });
+    const second = startServer({ app: createApp({ port: first.port, workspace: TEST_WORKSPACE }), port: first.port });
 
     await expect(second).rejects.toBeInstanceOf(PortInUseError);
     await expect(second).rejects.toMatchObject({ cause: { code: "EADDRINUSE" } });
@@ -169,6 +175,27 @@ describe("network exposure", () => {
   );
 });
 
+/**
+ * Resolves with what the server sends before it ends the connection, for a request written by
+ * hand. The client keeps its own side open, so a request has to be one that makes the server end
+ * the connection, and it must stop where Node stops reading: bytes that the server has not read
+ * when it ends the connection would turn the end into a reset.
+ */
+function answerTo(port: number, request: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
+    sockets.push(socket);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      received += chunk;
+    });
+    socket.on("end", () => resolve(received));
+    socket.on("error", reject);
+    socket.write(request);
+  });
+}
+
 // Node answers these itself, past the middleware that puts the headers on everything the app answers.
 describe("a connection that Node gives up on", () => {
   const headerLines = Object.entries(securityHeaderValues())
@@ -186,26 +213,6 @@ describe("a connection that Node gives up on", () => {
     nodeServers.push(server);
     await once(server.listen(0, "127.0.0.1"), "listening");
     return { server, port: (server.address() as AddressInfo).port };
-  }
-
-  /**
-   * Resolves with what the server sends before it ends the connection. The client keeps its
-   * own side open, and each request stops where Node gives up: bytes that the server has not
-   * read when it ends the connection would turn the end into a reset.
-   */
-  function answerTo(port: number, request: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const socket = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
-      sockets.push(socket);
-      let received = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk: string) => {
-        received += chunk;
-      });
-      socket.on("end", () => resolve(received));
-      socket.on("error", reject);
-      socket.write(request);
-    });
   }
 
   it.each([
@@ -231,6 +238,101 @@ describe("a connection that Node gives up on", () => {
     // The client has not closed its side. Had the server only ended its own, the connection would remain.
     const connections = await new Promise((resolve) => server.getConnections((_error, count) => resolve(count)));
     expect(connections).toBe(0);
+  });
+});
+
+// Node parses these requests, and then the app is never asked: Node refuses some of them itself,
+// and so does the adapter that makes the app's request out of Node's. Where the app fails
+// outright, the adapter answers in its place.
+describe("an answer that does not come from the app", () => {
+  // Each header once, with the value that is on every answer of the app.
+  const securityHeaders = Object.fromEntries(
+    Object.entries(securityHeaderValues()).map(([name, value]) => [name.toLowerCase(), [value]]),
+  );
+
+  /** The status line of an answer, and the values of its security headers by their names in lower case. */
+  function read(answer: string): { status: string; securityHeaders: Record<string, string[]> } {
+    const [status = "", ...lines] = (answer.split("\r\n\r\n")[0] ?? "").split("\r\n");
+    const found: Record<string, string[]> = {};
+    for (const line of lines) {
+      const name = line.slice(0, line.indexOf(":")).toLowerCase();
+      if (name in securityHeaders) found[name] = [...(found[name] ?? []), line.slice(line.indexOf(":") + 1).trim()];
+    }
+    return { status, securityHeaders: found };
+  }
+
+  // A request written by hand: its first line and its headers. The last header makes the server
+  // end the connection once it has answered, which is what answerTo() waits for.
+  const request = (line: string, ...headers: string[]) => [line, ...headers, "Connection: close", "", ""].join("\r\n");
+  const get = (host: string) => request("GET /api/workspace HTTP/1.1", `Host: ${host}`);
+
+  it.each([
+    [
+      "has no Host header, which Node refuses",
+      () => request("GET /api/workspace HTTP/1.1"),
+      "HTTP/1.1 400 Bad Request",
+    ],
+    [
+      "expects something that Node does not know",
+      (host: string) => request("GET /api/workspace HTTP/1.1", `Host: ${host}`, "Expect: nothing-known"),
+      "HTTP/1.1 417 Expectation Failed",
+    ],
+    ["has a Host header that is no host", (host: string) => get(`evil@${host}`), "HTTP/1.1 400 Bad Request"],
+    ["has a Host header that holds a space", () => get("127.0.0.1 evil.example"), "HTTP/1.1 400 Bad Request"],
+    [
+      "asks for no address at all",
+      (host: string) => request("OPTIONS * HTTP/1.1", `Host: ${host}`),
+      "HTTP/1.1 400 Bad Request",
+    ],
+    [
+      "names a full address that is no URL",
+      (host: string) => request("GET http://[ HTTP/1.1", `Host: ${host}`),
+      "HTTP/1.1 400 Bad Request",
+    ],
+  ])("carries the security headers when a request %s", async (_label, written, status) => {
+    const server = await start();
+
+    const answer = read(await answerTo(server.port, written(`127.0.0.1:${server.port}`)));
+
+    expect(answer).toEqual({ status, securityHeaders });
+  });
+
+  it.each([
+    [
+      "throws",
+      () => {
+        throw new Error("boom");
+      },
+    ],
+    ["rejects", () => Promise.reject(new Error("boom"))],
+  ])("carries the security headers when the app %s instead of answering", async (_label, fetch) => {
+    const server = await start({ app: { fetch } });
+
+    const answer = read(await answerTo(server.port, get(`127.0.0.1:${server.port}`)));
+
+    expect(answer).toEqual({ status: "HTTP/1.1 500 Internal Server Error", securityHeaders });
+  });
+
+  it("carries the security headers when the answer of the app cannot be written", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The Headers class takes this value; Node refuses to write it, and the adapter answers 500.
+    const server = await start({ app: { fetch: () => new Response("", { headers: { "x-broken": "a\u0001b" } }) } });
+
+    const answer = read(await answerTo(server.port, get(`127.0.0.1:${server.port}`)));
+
+    expect(answer.status).toMatch(/^HTTP\/1\.1 500 /);
+    expect(answer.securityHeaders).toEqual(securityHeaders);
+    expect(logged).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: "ERR_INVALID_CHAR" }));
+  });
+
+  // The app sets the same headers on its own answers. They replace the ones that were there
+  // from the start, so that no browser ever gets a policy twice.
+  it("leaves each security header once on an answer of the app", async () => {
+    const server = await start();
+
+    const answer = read(await answerTo(server.port, get(`127.0.0.1:${server.port}`)));
+
+    expect(answer).toEqual({ status: "HTTP/1.1 200 OK", securityHeaders });
   });
 });
 
