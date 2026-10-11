@@ -42,7 +42,8 @@ function connectionHint(code: string | undefined): string {
   if (code && TLS_ERROR_CODES.has(code)) {
     return "Certyfikat endpointu nie jest zaufany. Ustaw NODE_EXTRA_CA_CERTS na plik z certyfikatem firmowego CA i uruchom ponownie.";
   }
-  if (code === "ENOTFOUND") return "Nie znaleziono hosta. Sprawdź ANTHROPIC_BASE_URL oraz połączenie z siecią firmową lub VPN.";
+  if (code === "ENOTFOUND")
+    return "Nie znaleziono hosta. Sprawdź ANTHROPIC_BASE_URL oraz połączenie z siecią firmową lub VPN.";
   if (code === "ECONNREFUSED") return "Host odrzucił połączenie. Sprawdź adres i port w ANTHROPIC_BASE_URL.";
   return "Nie udało się połączyć z endpointem. Sprawdź adres, sieć i ewentualne proxy.";
 }

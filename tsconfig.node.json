@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "lib": ["ES2025"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"]
+  },
+  // Everything but the web app and the end-to-end tests, so that a new directory is checked without being listed.
+  "include": ["**/*"],
+  // The last four hold what git ignores: workspace data, which can include dropped source files, and the
+  // output of the diagnostics and of the end-to-end runs.
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/web",
+    "e2e",
+    "workspaces",
+    "diagnostics",
+    "test-results",
+    "playwright-report"
+  ]
+}

@@ -164,8 +164,8 @@ export function resolveConfig(options: ConfigOptions, deps: ConfigDeps): Resolve
 
   const envToken = nonEmpty(connection.ANTHROPIC_AUTH_TOKEN);
   const envKey = nonEmpty(connection.ANTHROPIC_API_KEY);
-  let apiKey: string | null | undefined = undefined;
-  let authToken: string | null | undefined = undefined;
+  let apiKey: string | null | undefined;
+  let authToken: string | null | undefined;
   let credentialSource: CredentialSource;
   if (options.credentialCommand) {
     // Claude Code sends a helper's value in both headers; gateways rely on either.
@@ -221,7 +221,10 @@ export function resolveConfig(options: ConfigOptions, deps: ConfigDeps): Resolve
   }
 
   const redact = options.redactEndpoint ?? false;
-  const label = (nonEmpty(options.label) ?? (redact ? "endpoint" : new URL(endpoint).host)).replace(/[^A-Za-z0-9._-]+/g, "-");
+  const label = (nonEmpty(options.label) ?? (redact ? "endpoint" : new URL(endpoint).host)).replace(
+    /[^A-Za-z0-9._-]+/g,
+    "-",
+  );
 
   return {
     client: { baseURL: baseUrl ?? DEFAULT_ENDPOINT, apiKey, authToken, defaultHeaders },

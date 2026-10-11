@@ -27,6 +27,7 @@ export interface RecordedRequest {
   method: string;
   path: string;
   headers: Headers;
+  // biome-ignore lint/suspicious/noExplicitAny: tests assert on arbitrary request bodies without narrowing them first
   body: any;
 }
 
@@ -35,11 +36,16 @@ export interface FakeEndpoint {
   requests: RecordedRequest[];
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: request and response bodies are free-form JSON in this test double
 type Json = Record<string, any>;
 
 const THINKING_SIGNATURE = "sig-fake-0001";
 const CACHED_TOKENS = 5_000;
-const STREAM_DELTA_DELAY_MS = 20;
+// Slow on purpose. The stream check wants 50 ms between the first and the last
+// text delta as the client sees them, and a client that gets no processor time
+// for a while sees everything that arrived meanwhile at once. With eight deltas
+// this far apart it can lose 0.7 s and still pass.
+const STREAM_DELTA_DELAY_MS = 100;
 
 function errorResponse(status: number, type: string, message: string): Response {
   return Response.json({ type: "error", error: { type, message } }, { status, headers: { "request-id": "req_fake" } });
@@ -51,14 +57,21 @@ function blocksOf(message: Json | undefined): Json[] {
 }
 
 function resultText(result: Json): string {
-  return typeof result.content === "string" ? result.content : blocksOf(result).map((block) => block.text ?? "").join(" ");
+  return typeof result.content === "string"
+    ? result.content
+    : blocksOf(result)
+        .map((block) => block.text ?? "")
+        .join(" ");
 }
 
 function hasCacheControl(body: Json): boolean {
   const system = Array.isArray(body.system) ? body.system : [];
   const tools: Json[] = body.tools ?? [];
   const messageBlocks = (body.messages as Json[]).flatMap((message) => blocksOf(message));
-  return [...system, ...tools, ...messageBlocks].some((item: Json) => item.cache_control != null) || body.cache_control != null;
+  return (
+    [...system, ...tools, ...messageBlocks].some((item: Json) => item.cache_control != null) ||
+    body.cache_control != null
+  );
 }
 
 function rejectedField(body: Json, reject: RejectableField[]): string | undefined {
@@ -88,7 +101,10 @@ function streamResponse(message: Json, buffered: boolean): Response {
   const events: Array<{ payload: string; delayed: boolean }> = [];
   const push = (event: Json, delayed = false) => events.push({ payload: sse(event), delayed });
 
-  push({ type: "message_start", message: { ...message, content: [], stop_reason: null, usage: { ...message.usage, output_tokens: 0 } } });
+  push({
+    type: "message_start",
+    message: { ...message, content: [], stop_reason: null, usage: { ...message.usage, output_tokens: 0 } },
+  });
   (message.content as Json[]).forEach((block, index) => {
     if (block.type === "text") {
       push({ type: "content_block_start", index, content_block: { type: "text", text: "" } });
@@ -100,11 +116,19 @@ function streamResponse(message: Json, buffered: boolean): Response {
       push({ type: "content_block_delta", index, delta: { type: "signature_delta", signature: block.signature } });
     } else {
       push({ type: "content_block_start", index, content_block: { ...block, input: {} } });
-      push({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) } });
+      push({
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) },
+      });
     }
     push({ type: "content_block_stop", index });
   });
-  push({ type: "message_delta", delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: message.usage.output_tokens } });
+  push({
+    type: "message_delta",
+    delta: { stop_reason: message.stop_reason, stop_sequence: null },
+    usage: { output_tokens: message.usage.output_tokens },
+  });
   push({ type: "message_stop" });
 
   const encoder = new TextEncoder();
@@ -121,7 +145,10 @@ function streamResponse(message: Json, buffered: boolean): Response {
       controller.close();
     },
   });
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "request-id": "req_fake" } });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "request-id": "req_fake" },
+  });
 }
 
 export function createFakeEndpoint(behavior: FakeBehavior = {}): FakeEndpoint {
@@ -214,7 +241,9 @@ export function createFakeEndpoint(behavior: FakeBehavior = {}): FakeEndpoint {
       type: "message",
       role: "assistant",
       model,
-      content: behavior.thinkingBlocks ? [{ type: "thinking", thinking: "", signature: THINKING_SIGNATURE }, ...content] : content,
+      content: behavior.thinkingBlocks
+        ? [{ type: "thinking", thinking: "", signature: THINKING_SIGNATURE }, ...content]
+        : content,
       stop_reason: stopReason,
       stop_sequence: null,
       usage: usage(body),

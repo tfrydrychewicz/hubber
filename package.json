@@ -5,20 +5,45 @@
   "type": "module",
   "description": "Hub pracy Engineering Managera / Dyrektora",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
-    "diagnose": "tsx scripts/diagnose.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "dev": "node scripts/preflight.cjs && exec node scripts/dev.ts",
+    "build": "node scripts/preflight.cjs && exec vite build",
+    "start": "node scripts/preflight.cjs && vite build --logLevel warn && exec env -u HUBBER_DEV_ORIGIN node src/server/main.ts",
+    "typecheck": "tsc -b --force",
+    "lint": "biome check --error-on-warnings",
+    "format": "biome check --write",
+    "test": "node scripts/preflight.cjs && exec vitest run",
+    "test:watch": "node scripts/preflight.cjs && exec vitest watch",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium webkit",
+    "check": "node scripts/preflight.cjs && npm run lint && npm run typecheck && npm run test",
+    "diagnose": "node scripts/preflight.cjs && exec node scripts/diagnose.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.132.1"
+    "@anthropic-ai/sdk": "^0.132.1",
+    "@hono/node-server": "^2.1.4",
+    "@tanstack/react-query": "^5.104.1",
+    "hono": "^4.13.13",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
-    "tsx": "^4.23.15",
+    "@biomejs/biome": "2.5.15",
+    "@playwright/test": "1.64.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "jsdom": "^30.1.2",
+    "tailwindcss": "4.3.3",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
   }
 }

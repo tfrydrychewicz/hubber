@@ -42,23 +42,38 @@ describe("renderHeader", () => {
 
   it("marks a redacted and a default endpoint", () => {
     expect(renderHeader({ ...META, endpoint: null })).toContain("(ukryty)");
-    expect(renderHeader({ ...META, endpoint: "https://api.anthropic.com", endpointIsDefault: true })).toContain("(domyślny)");
+    expect(renderHeader({ ...META, endpoint: "https://api.anthropic.com", endpointIsDefault: true })).toContain(
+      "(domyślny)",
+    );
   });
 });
 
 describe("renderResult", () => {
-  const base: CheckResult = { id: "effort", group: "optional", title: "Poziom wysiłku (effort)", status: "confirmed", durationMs: 1234, detail: "Działa." };
+  const base: CheckResult = {
+    id: "effort",
+    group: "optional",
+    title: "Poziom wysiłku (effort)",
+    status: "confirmed",
+    durationMs: 1234,
+    detail: "Działa.",
+  };
 
   it("shows the status, the title, the duration and the detail", () => {
     expect(renderResult(base)).toBe("  OK          Poziom wysiłku (effort) (1,2 s)\n              Działa.");
   });
 
   it("adds the hint for errors and omits the duration for skipped checks", () => {
-    const failed = renderResult({ ...base, status: "error", error: { kind: "http", message: "x", hint: "Sprawdź token." } });
+    const failed = renderResult({
+      ...base,
+      status: "error",
+      error: { kind: "http", message: "x", hint: "Sprawdź token." },
+    });
     expect(failed).toContain("BŁĄD");
     expect(failed).toContain("Wskazówka: Sprawdź token.");
 
-    expect(renderResult({ ...base, status: "skipped", durationMs: 0 })).toContain("POMINIĘTE   Poziom wysiłku (effort)\n");
+    expect(renderResult({ ...base, status: "skipped", durationMs: 0 })).toContain(
+      "POMINIĘTE   Poziom wysiłku (effort)\n",
+    );
   });
 });
 
@@ -77,9 +92,15 @@ describe("renderSummary", () => {
   });
 
   it("suggests the endpoint's models when the basic call failed", () => {
-    const checks = report().checks.map((check): CheckResult => (check.id === "message" ? { ...check, status: "error" } : check));
+    const checks = report().checks.map(
+      (check): CheckResult => (check.id === "message" ? { ...check, status: "error" } : check),
+    );
     const summary = renderSummary(
-      report({ checks, availableModels: ["router-opus", "router-sonnet"], summary: { ...report().summary, coreReady: false } }),
+      report({
+        checks,
+        availableModels: ["router-opus", "router-sonnet"],
+        summary: { ...report().summary, coreReady: false },
+      }),
     );
 
     expect(summary).toContain("NIEGOTOWY");

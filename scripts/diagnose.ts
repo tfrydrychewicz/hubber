@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
-import { ConfigError, resolveConfig } from "../src/server/llm/diagnostics/config.ts";
+import { ConfigError, type ResolvedConfig, resolveConfig } from "../src/server/llm/diagnostics/config.ts";
 import { renderGroupTitle, renderHeader, renderResult, renderSummary } from "../src/server/llm/diagnostics/report.ts";
 import { runDiagnostics } from "../src/server/llm/diagnostics/run.ts";
 import { CHECK_IDS, type CheckGroup, type CheckId } from "../src/server/llm/diagnostics/types.ts";
@@ -54,7 +54,10 @@ function fail(message: string): never {
 
 function parseCheckList(value: string | undefined, flag: string): CheckId[] | undefined {
   if (value === undefined) return undefined;
-  const ids = value.split(",").map((id) => id.trim()).filter(Boolean);
+  const ids = value
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
   const unknown = ids.filter((id) => !(CHECK_IDS as readonly string[]).includes(id));
   if (unknown.length > 0) fail(`Nieznany test w ${flag}: ${unknown.join(", ")}. Dostępne: ${CHECK_IDS.join(", ")}`);
   return ids as CheckId[];
@@ -69,10 +72,9 @@ function timestamp(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
-async function main(): Promise<void> {
-  let values;
+function parseCliArgs() {
   try {
-    ({ values } = parseArgs({
+    return parseArgs({
       options: {
         "claude-settings": { type: "string" },
         "credential-command": { type: "string" },
@@ -87,10 +89,14 @@ async function main(): Promise<void> {
         json: { type: "boolean", default: false },
         help: { type: "boolean", default: false },
       },
-    }));
+    }).values;
   } catch (err) {
     fail(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`);
   }
+}
+
+async function main(): Promise<void> {
+  const values = parseCliArgs();
   if (values.help) {
     console.log(USAGE);
     return;
@@ -101,7 +107,7 @@ async function main(): Promise<void> {
   const timeoutSeconds = values.timeout === undefined ? DEFAULT_TIMEOUT_SECONDS : Number(values.timeout);
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) fail(`Niepoprawna wartość --timeout: ${values.timeout}`);
 
-  let config;
+  let config: ResolvedConfig;
   try {
     config = resolveConfig(
       {
@@ -116,7 +122,11 @@ async function main(): Promise<void> {
         readFile: (path) => readFileSync(path, "utf8"),
         // stderr stays attached to the terminal so the helper's own errors are visible.
         runCommand: (command) =>
-          execFileSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "inherit"] }),
+          execFileSync("/bin/sh", ["-c", command], {
+            encoding: "utf8",
+            timeout: 30_000,
+            stdio: ["ignore", "pipe", "inherit"],
+          }),
       },
     );
   } catch (err) {

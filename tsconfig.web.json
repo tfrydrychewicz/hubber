@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.web.tsbuildinfo",
+    "lib": ["ES2025", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    // No "node": this code runs in the browser. Its tests run in Node and get those types in tsconfig.web-test.json.
+    "types": ["vite/client"]
+  },
+  "include": ["src/web", "src/shared"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/web/test"]
+}

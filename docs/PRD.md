@@ -353,7 +353,7 @@ Użytkownik pyta: „Co mam omówić z Anią w czwartek?"
 | NFR-7 | Niezawodność | Żadna wrzutka nie ginie. Kolejka przetwarzania przeżywa restart. Ponowienie przetwarzania nie tworzy duplikatów. |
 | NFR-8 | Przenośność danych | Cały stan workspace'u mieści się w jednym katalogu; kopia zapasowa to kopia katalogu. Eksport wszystkich danych do Markdownu i JSON-u wchodzi do M2. |
 | NFR-9 | Język | Treści po polsku i angielsku, także mieszane. Interfejs po polsku. |
-| NFR-10 | Platforma | macOS, aktualne wersje Chrome i Safari, ekran komputera. |
+| NFR-10 | Platforma | macOS, aktualna wersja Chrome, ekran komputera. |
 | NFR-11 | Testowalność | Zestaw regresyjny przetwarzania ma dwa warianty: syntetyczny (uruchamiany na każdym endpoincie) i rzeczywisty (tylko w workspace służbowym). Jest uruchamiany przy każdej zmianie promptów lub modelu; wynikiem jest trafność powiązań i liczba błędnych operacji. |
 | NFR-12 | Uruchomienie | Instalacja i start jednym poleceniem; żadnych usług zewnętrznych do postawienia. |
 

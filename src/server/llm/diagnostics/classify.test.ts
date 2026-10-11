@@ -10,10 +10,16 @@ const anthropicBody = (type: string, message: string) => ({ type: "error", error
 
 describe("classifyError", () => {
   it.each([400, 413, 422])("treats HTTP %i as the endpoint rejecting the request shape", (status) => {
-    const result = classifyError(apiError(status, anthropicBody("invalid_request_error", "strict: Extra inputs are not permitted")));
+    const result = classifyError(
+      apiError(status, anthropicBody("invalid_request_error", "strict: Extra inputs are not permitted")),
+    );
 
     expect(result.status).toBe("rejected");
-    expect(result.error).toMatchObject({ kind: "http", httpStatus: status, message: "strict: Extra inputs are not permitted" });
+    expect(result.error).toMatchObject({
+      kind: "http",
+      httpStatus: status,
+      message: "strict: Extra inputs are not permitted",
+    });
   });
 
   it.each([401, 403, 404, 429, 500, 529])("treats HTTP %i as unrelated to the feature under test", (status) => {
@@ -32,7 +38,9 @@ describe("classifyError", () => {
 
   it("explains an untrusted certificate", () => {
     const cause = Object.assign(new Error("fetch failed"), {
-      cause: Object.assign(new Error("self-signed certificate in certificate chain"), { code: "SELF_SIGNED_CERT_IN_CHAIN" }),
+      cause: Object.assign(new Error("self-signed certificate in certificate chain"), {
+        code: "SELF_SIGNED_CERT_IN_CHAIN",
+      }),
     });
     const { status, error } = classifyError(new Anthropic.APIConnectionError({ cause }));
 
@@ -44,7 +52,8 @@ describe("classifyError", () => {
 
   it("explains an unknown host and a refused connection", () => {
     const withCode = (code: string) =>
-      classifyError(new Anthropic.APIConnectionError({ cause: Object.assign(new Error("fetch failed"), { code }) })).error.hint;
+      classifyError(new Anthropic.APIConnectionError({ cause: Object.assign(new Error("fetch failed"), { code }) }))
+        .error.hint;
 
     expect(withCode("ENOTFOUND")).toContain("ANTHROPIC_BASE_URL");
     expect(withCode("ECONNREFUSED")).toContain("port");

@@ -1,4 +1,11 @@
-import { CHECKS, type CheckGroup, type CheckResult, type CheckStatus, type DiagnosticsReport, type ReportMeta } from "./types.ts";
+import {
+  CHECKS,
+  type CheckGroup,
+  type CheckResult,
+  type CheckStatus,
+  type DiagnosticsReport,
+  type ReportMeta,
+} from "./types.ts";
 
 const STATUS_LABEL: Record<CheckStatus, string> = {
   confirmed: "OK",
@@ -38,7 +45,10 @@ export function renderGroupTitle(group: CheckGroup): string {
 
 export function renderResult(result: CheckResult): string {
   const timing = result.status === "skipped" ? "" : ` (${seconds(result.durationMs)})`;
-  const lines = [`  ${STATUS_LABEL[result.status].padEnd(LABEL_WIDTH)}${result.title}${timing}`, `${INDENT}${result.detail}`];
+  const lines = [
+    `  ${STATUS_LABEL[result.status].padEnd(LABEL_WIDTH)}${result.title}${timing}`,
+    `${INDENT}${result.detail}`,
+  ];
   if (result.error?.hint) lines.push(`${INDENT}Wskazówka: ${result.error.hint}`);
   return lines.join("\n");
 }

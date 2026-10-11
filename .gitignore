@@ -1,11 +1,20 @@
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Poświadczenia i konfiguracja lokalna
 .env
 .env.*
 
+# Dane workspace'ów nigdy nie trafiają do repozytorium (domyślnie leżą poza nim).
+/workspaces/
+
 # Wyniki diagnostyki endpointu zawierają adres routera.
 # Ukośnik na początku ogranicza regułę do katalogu głównego; bez niego
 # pasowałaby też do src/server/llm/diagnostics.
 /diagnostics/
+
+# Artefakty testów. Ślady Playwrighta zawierają treść stron.
+/test-results/
+/playwright-report/
+.vitest/

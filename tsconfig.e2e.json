@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    // A server module that a spec imports is checked here a second time, together with what it
+    // imports, with the DOM's types beside Node's. Code that is right for Node alone can fail
+    // here: with the DOM's types a Response does not accept a stream from node:stream.
+    "lib": ["ES2025", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"]
+  },
+  "include": ["e2e"]
+}

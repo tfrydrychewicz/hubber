@@ -346,7 +346,11 @@ const thinking: CheckFn = async (ctx) => {
       model: ctx.model,
       max_tokens: ctx.maxTokens,
       thinking: { type: "adaptive" },
-      messages: [question, { role: "assistant", content: first.content }, { role: "user", content: "A który jest najpóźniejszy?" }],
+      messages: [
+        question,
+        { role: "assistant", content: first.content },
+        { role: "user", content: "A który jest najpóźniejszy?" },
+      ],
     });
   } catch (err) {
     if (!(err instanceof Anthropic.BadRequestError)) throw err;

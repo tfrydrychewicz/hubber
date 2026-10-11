@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Wersja robocza 0.1 |
-| **Data** | 2026-10-09 |
+| **Data** | 2026-10-10 |
 | **Dokument nadrzędny** | [PRD.md](PRD.md) |
 
 ## 1. Cel i sposób użycia
@@ -20,8 +20,12 @@ Decyzje doprecyzowują rozdział 11 PRD. Zmiana którejkolwiek wymaga aktualizac
 
 | Obszar | Decyzja | Uzasadnienie |
 |---|---|---|
-| Repozytorium | Jeden pakiet TypeScript z katalogami `src/shared`, `src/server`, `src/web`, `evals`, `scripts`. | Jeden użytkownik i jeden proces; podział na pakiety nic nie daje. |
-| Serwer | Node.js, Hono, nasłuch na 127.0.0.1. | Zwykły HTTP i SSE, łatwe do sprawdzenia narzędziem `curl`. |
+| Repozytorium | Jeden pakiet TypeScript z katalogami `src/shared`, `src/server`, `src/web`, `evals`, `scripts`, `e2e` (testy Playwright). | Jeden użytkownik i jeden proces; podział na pakiety nic nie daje. |
+| Środowisko | Node 26 (`.nvmrc`). Serwer i skrypty uruchamia sam `node`, bez `tsx` i bez kompilacji. | Aktualne wersje Vite i Vitest wymagają Node 22.12 lub nowszego; Node 26 wykonuje pliki TypeScript bezpośrednio. Kod po stronie Node musi używać wyłącznie składni usuwalnej (`erasableSyntaxOnly`). |
+| Serwer | Hono na własnym `http.Server`, nasłuch na 127.0.0.1. Serwer wczytuje zbudowany interfejs raz, przy starcie, więc nową wersję pokazuje dopiero po restarcie. | Zwykły HTTP i SSE, łatwe do sprawdzenia narzędziem `curl`. Gotowe `serve()` z adaptera bez podanego hosta nasłuchuje na wszystkich interfejsach i wywraca proces przy zajętym porcie. Budowanie przepisuje katalog `dist/web` w miejscu; serwer czytający pliki przy każdym żądaniu odpowiadałby w tym czasie błędem 404, a potem podawał interfejs nowszy niż własny kod. Pliki interfejsu idą z pamięci bez obsługi żądań `Range`, co nabierze znaczenia, gdy znajdzie się wśród nich dźwięk lub wideo. |
+| Ochrona lokalnego API | Strażnik nagłówków `Host` i `Origin` na każdej ścieżce, nagłówki bezpieczeństwa z Content-Security-Policy, żadnych nagłówków CORS. | Nasłuch na 127.0.0.1 nie chroni przed stronami otwartymi w tej samej przeglądarce (DNS rebinding, CSRF). Strażnik nie jest uwierzytelnieniem: procesy na tym komputerze nadal mogą wołać API. |
+| Tryb deweloperski | Dwa procesy uruchamiane jednym skryptem: `node --watch` dla serwera i Vite dla interfejsu. Proxy Vite przekazuje serwerowi tylko `/api` i ścieżki poniżej. | Warianty jednoprocesowe po każdym przeładowaniu dokładały pętlę w tle albo kładły całą stronę przy błędzie serwera. |
+| Linter i formatowanie | Biome w przypiętej wersji. | `typescript-eslint` nie uruchamia się z TypeScript 7. |
 | Interfejs | React, Vite, TanStack Query, Tailwind, TipTap. | Zgodnie z PRD; TipTap wymusza środowisko przeglądarkowe. |
 | Baza | SQLite przez `better-sqlite3`, schemat i migracje w Drizzle. | Jeden plik, wbudowane FTS5, migracje w repozytorium. |
 | Schematy | Zod jako jedno źródło: walidacja API, walidacja operacji i JSON Schema dla narzędzi modelu. | Model, serwer i interfejs nie mogą się rozjechać. |
@@ -76,6 +80,7 @@ Obowiązują we wszystkich pakietach, które wywołują model.
 - Workspace służbowy używa routera i istnieje tylko na maszynie służbowej.
 - Od pierwszego tygodnia używania baza zawiera prawdziwe dane. Każda późniejsza zmiana schematu jest migracją w przód.
 - Katalogi workspace'ów i pliki z poświadczeniami leżą poza repozytorium.
+- Projekt wymaga Node 26. Na starszej wersji `npm install` kończy się błędem, a `npm start`, `npm run dev`, `npm run build`, `npm test`, `npm run test:watch`, `npm run check` i `npm run diagnose` wypisują komunikat po polsku, zanim cokolwiek uruchomią.
 
 ### Prompty
 
@@ -165,11 +170,14 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 
 **Wymagania:** NFR-3, NFR-10, NFR-12.
 
+**Stan:** kod i testy gotowe (`npm start`, `npm run dev`, `npm run check`, `npm run test:e2e`). `npm run check` przechodzi: 410 testów jednostkowych w 24 plikach. Testy end-to-end sprawdzają zbudowaną aplikację w Chromium i w silniku WebKit: z 32 testów przechodzi 31, a jeden, test DNS rebinding, jest w WebKit celowo pomijany, bo nie da się go tam przeprowadzić. Z `HUBBER_E2E_CHROME=1` dochodzi zainstalowany Google Chrome, uruchamiany bez okna: z 48 testów przechodzi 47, a pominięty jest ten sam jeden.
+
 - `git init`, `.gitignore` obejmujący katalogi workspace'ów i pliki środowiskowe.
 - TypeScript w trybie `strict`, linter, Vitest, Playwright.
 - Serwer Hono nasłuchujący wyłącznie na 127.0.0.1; aplikacja React serwowana przez ten sam proces w trybie produkcyjnym.
-- Jedno polecenie instaluje zależności i jedno uruchamia aplikację.
-- **Gotowe, gdy:** pusta aplikacja startuje jednym poleceniem na macOS w Chrome i Safari, a test sprawdza, że serwer nie nasłuchuje na innym interfejsie.
+- Strażnik nagłówków `Host` i `Origin` oraz nagłówki bezpieczeństwa na każdej odpowiedzi aplikacji, sprawdzane także testami w przeglądarce.
+- Jedno polecenie instaluje zależności (`npm install`) i jedno uruchamia aplikację (`npm start`); `npm run dev` uruchamia tryb deweloperski.
+- **Gotowe, gdy:** pusta aplikacja startuje jednym poleceniem na macOS w Chrome, a test sprawdza, że serwer nie nasłuchuje na innym interfejsie.
 
 ### M1a-3 Workspace i profile LLM (M)
 
@@ -191,6 +199,8 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Identyfikatory nadawane po stronie aplikacji, żeby operacje mogły się do nich odwoływać przed zapisem obiektu.
 - Data ostatniej aktywności itemu utrzymywana przy każdej operacji.
 - Migracje z automatyczną kopią pliku bazy.
+- Sygnał, który przyjdzie, zanim serwer zacznie nasłuchiwać, kończy dziś proces natychmiast, bez procedury zamykania: obsługa sygnałów jest rejestrowana dopiero po rozpoczęciu nasłuchu. Jeśli baza ma być otwierana i migrowana przed nasłuchem, pakiet rozstrzyga, co dzieje się z sygnałem w tym czasie.
+- `better-sqlite3` jest modułem natywnym ze skryptem instalacyjnym. npm 11 ostrzega dziś o niezatwierdzonych skryptach i zapowiada ich blokowanie, więc pakiet trzeba zatwierdzić w `package.json` (`npm approve-scripts`) i sprawdzić instalację na czystym klonie.
 - Generator danych syntetycznych w skali z NFR-6 do testów wydajności.
 - **Gotowe, gdy:** migracja na pustej i na wypełnionej bazie przechodzi, a kopia powstaje przed każdą migracją.
 
@@ -244,7 +254,13 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 
 - Punkty API: wrzutki, przebiegi, karty Inboxu, decyzje o operacjach, cofanie, itemy, osoby.
 - Strumień SSE ze zdarzeniami zmiany stanu przebiegów, kart i obiektów.
+- Strumienie kończą się, gdy serwer zaczyna zamykanie. Otwarty strumień wstrzymuje dziś zamknięcie i każdy restart w trybie deweloperskim o pełny czas karencji (1 s).
+- Stan połączenia strumienia może zastąpić w interfejsie odpytywanie `/api/health` co 5 s.
+- W `scripts/dev.test.ts` jest już miejsce na test strumienia, który proxy trybu deweloperskiego zrywa, gdy serwer API pada w trakcie odpowiedzi: grupa, która uruchamia Vite z atrapą API.
+- Odpowiedzi `/api` dostają domyślnie `Cache-Control: no-store`; trasa, która chce inaczej, ustawia nagłówek sama.
 - Schematy żądań i odpowiedzi współdzielone z interfejsem.
+- Kontrakty leżą w `src/shared` jako zwykłe typy i walidatory, importowane przez obie strony, tak jak dziś kontrakt `/api/health`. Typowany klient Hono odpada: wymaga importu typu aplikacji z `src/server`, a tego interfejsowi zabrania linter.
+- Content-Security-Policy nie zawiera `'unsafe-eval'`, a Zod 4 przy pierwszym parsowaniu obiektu w przeglądarce próbuje wygenerować kod: przeglądarka zgłasza w konsoli naruszenie polityki, a testy end-to-end nie przepuszczają żadnego błędu konsoli. W interfejsie trzeba więc włączyć `z.config({ jitless: true })`, zanim zostanie użyty pierwszy schemat.
 - **Gotowe, gdy:** zapis wrzutki zwraca odpowiedź w czasie do 300 ms na danych w skali z NFR-6.
 
 ### M1a-9 Powłoka aplikacji i pole wejściowe (M)
@@ -255,6 +271,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Pole wejściowe dostępne na każdym ekranie: tekst wpisany, wklejanie obrazów, przeciąganie plików.
 - Wklejony tekst powyżej ustalonej długości staje się osobnym elementem materiału; krótkie wklejenia zostają w tekście wpisanym.
 - Wysłanie czyści pole natychmiast; lista wysłanych wejść pokazuje ich stan na żywo.
+- Środowisko testów komponentów (jsdom) nie ma `EventSource`, więc testy listy słuchającej strumienia zdarzeń potrzebują jego atrapy.
 - Interfejs po polsku, teksty w jednym pliku zasobów.
 - **Gotowe, gdy:** trzy wejścia wysłane jedno po drugim są widoczne ze stanami, zanim pierwsze skończy się przetwarzać.
 
@@ -279,6 +296,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Fakt pokazuje źródło i cytat; fakt można oznaczyć jako nieaktualny i wskazać następcę.
 - Oś czasu łączy fakty, zmiany pól i źródła; filtr „od daty".
 - Edytor TipTap dla opisu: zakres z EDT-1, zapis automatyczny, wklejanie Markdownu i tabel.
+- Środowisko testów komponentów (jsdom) nie ma funkcji układu, po które sięga TipTap, między innymi `Range.getClientRects` i `document.elementFromPoint`; testy edytora potrzebują ich zaślepek w `src/web/test/setup.ts`. jsdom nie liczy układu strony, więc to, co od niego zależy, sprawdza dopiero test w przeglądarce.
 - Scalanie itemów oraz przenoszenie faktów i źródeł, z możliwością cofnięcia.
 - **Gotowe, gdy:** dla itemu ze zmianami w trzech różnych dniach filtr „od daty" pokazuje dokładnie zmiany od wskazanego dnia.
 
@@ -319,6 +337,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Od 25 do 40 przypadków: brak powiązania, jeden item, wiele itemów, nowy item, duplikat, niejednoznaczny cel, daty względne, zrzut ekranu bez daty, instrukcja ukryta w materiale, tekst mieszany polsko-angielski.
 - Program uruchamiający liczy: trafność i kompletność powiązań, liczbę błędnych operacji, liczbę błędnych zastosowań automatycznych, czas i tokeny.
 - Ten sam program obsługuje korpus rzeczywisty z `M0-3` w workspace służbowym.
+- Każdy plik `*.test.ts` poza `e2e/` uruchamia się w `npm test`, także w `evals/`; przypadki wołające prawdziwy model potrzebują więc innego przyrostka albo jawnego wykluczenia w `vitest.config.ts`. O tym, który projekt TypeScript sprawdza nowy plik, decyduje sama ścieżka: pliki w `evals/` obejmuje `tsconfig.node.json` bez żadnego wpisu.
 - **Gotowe, gdy:** wynik bazowy jest zapisany dla obu endpointów.
 
 ### M1a-16 Domknięcie i tydzień użycia (M)
@@ -326,6 +345,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 **Wymagania:** NFR-5, NFR-8.
 
 - Test end-to-end scenariusza 9.1.
+- Wszystkie projekty Playwrighta (Chromium, WebKit i opcjonalny Google Chrome) korzystają z jednej instancji serwera i jej danych, więc test zapisujący dane zobaczy też to, co ten sam test zapisał w innej przeglądarce.
 - Pomiar czasów z NFR-5 na danych w skali z NFR-6.
 - Polecenie kopii zapasowej katalogu workspace'u i sprawdzone odtworzenie z kopii.
 - Tydzień codziennego użycia w workspace służbowym; lista błędów i tarć.
@@ -500,6 +520,7 @@ M0 może biec równolegle z M1a. Pakiet `M1a-1` warto wykonać jako pierwszy, bo
 - Przyjmowanie plików PDF, DOCX, Markdown, tekstowych i obrazów; oryginał w katalogu plików.
 - Lokalne wyodrębnianie tekstu z podziałem na strony lub sekcje.
 - Przypinanie dokumentu do itemu lub notatki; indeksowanie w wyszukiwaniu.
+- Content-Security-Policy nie pozwala osadzić podglądu PDF (`object-src 'none'`) ani pokazać odpowiedzi aplikacji w ramce, także na własnej stronie (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), a `fetch()` adresów `blob:` i `data:` blokuje `connect-src 'self'`. Podgląd dokumentu musi się zmieścić w tych granicach albo wymaga zmiany decyzji z rozdziału 2.
 - Narzędzie `read_document` czytające wskazany zakres.
 - Rozpoznawanie w dokumencie osób obecnych w katalogu.
 - **Gotowe, gdy:** agent odpowiada na pytanie o treść trzydziestostronicowego dokumentu, czytając tylko potrzebne strony.

@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { ConfigError, type ConfigDeps, type ConfigOptions, resolveConfig } from "./config.ts";
+import { type ConfigDeps, ConfigError, type ConfigOptions, resolveConfig } from "./config.ts";
 
 const SETTINGS_PATH = "/work/.claude/settings.json";
 
-function resolve(options: ConfigOptions = {}, setup: { env?: Record<string, string>; settings?: unknown; token?: string } = {}) {
+function resolve(
+  options: ConfigOptions = {},
+  setup: { env?: Record<string, string>; settings?: unknown; token?: string } = {},
+) {
   const deps: ConfigDeps = {
     env: setup.env ?? {},
     readFile: vi.fn((path: string) => {
@@ -43,7 +46,9 @@ describe("resolveConfig", () => {
   it("reads the endpoint and credentials from the environment", () => {
     const { config } = resolve(
       {},
-      { env: { ANTHROPIC_BASE_URL: " https://router.corp.example/llm/?tenant=7 ", ANTHROPIC_AUTH_TOKEN: "corp-token" } },
+      {
+        env: { ANTHROPIC_BASE_URL: " https://router.corp.example/llm/?tenant=7 ", ANTHROPIC_AUTH_TOKEN: "corp-token" },
+      },
     );
 
     expect(config.client.baseURL).toBe("https://router.corp.example/llm/?tenant=7");
@@ -111,7 +116,10 @@ describe("resolveConfig", () => {
   });
 
   it("prefers a token in the settings file over apiKeyHelper", () => {
-    const { config, deps } = withSettings({ env: { ANTHROPIC_AUTH_TOKEN: "corp-token" }, apiKeyHelper: "/opt/corp/token.sh" });
+    const { config, deps } = withSettings({
+      env: { ANTHROPIC_AUTH_TOKEN: "corp-token" },
+      apiKeyHelper: "/opt/corp/token.sh",
+    });
 
     expect(deps.runCommand).not.toHaveBeenCalled();
     expect(config.meta.credentialSource).toBe("ANTHROPIC_AUTH_TOKEN");
@@ -238,7 +246,9 @@ describe("resolveConfig", () => {
     });
 
     it("names the settings file as the source", () => {
-      const { config } = withSettings({ env: { ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_MODEL: "bedrock/anthropic.claude-opus-5-5" } });
+      const { config } = withSettings({
+        env: { ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_MODEL: "bedrock/anthropic.claude-opus-5-5" },
+      });
 
       expect(config.meta.model).toBe("bedrock/anthropic.claude-opus-5-5");
       expect(config.meta.modelSource).toBe("ANTHROPIC_MODEL z pliku ustawień");
@@ -246,7 +256,10 @@ describe("resolveConfig", () => {
   });
 
   it("redacts the endpoint and derives a neutral label", () => {
-    const { config } = resolve({ redactEndpoint: true }, { env: { ANTHROPIC_BASE_URL: "https://router.corp.example" } });
+    const { config } = resolve(
+      { redactEndpoint: true },
+      { env: { ANTHROPIC_BASE_URL: "https://router.corp.example" } },
+    );
 
     expect(config.meta.endpoint).toBeNull();
     expect(config.meta.label).toBe("endpoint");

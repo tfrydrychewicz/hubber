@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { createFakeEndpoint, type FakeBehavior } from "./fake-endpoint.ts";
-import { runDiagnostics, type RunOptions } from "./run.ts";
+import { type RunOptions, runDiagnostics } from "./run.ts";
 import type { CheckId, CheckStatus, DiagnosticsReport, ReportMeta } from "./types.ts";
 
 const META: ReportMeta = {
@@ -18,7 +18,12 @@ const CORE: CheckId[] = ["message", "streaming", "tool_use", "tool_error", "imag
 
 async function diagnose(behavior: FakeBehavior = {}, options: Partial<RunOptions> = {}) {
   const endpoint = createFakeEndpoint(behavior);
-  const client = new Anthropic({ apiKey: "test-key", baseURL: "http://router.test", fetch: endpoint.fetch, maxRetries: 0 });
+  const client = new Anthropic({
+    apiKey: "test-key",
+    baseURL: "http://router.test",
+    fetch: endpoint.fetch,
+    maxRetries: 0,
+  });
   const report = await runDiagnostics({ client, meta: META, nonce: "abc12345", sleep: async () => {}, ...options });
   return { report, endpoint };
 }
@@ -83,9 +88,7 @@ describe("runDiagnostics", () => {
     const bodies = endpoint.requests.map((request) => request.body);
     expect(bodies.length).toBeGreaterThanOrEqual(7);
     for (const body of bodies) {
-      expect(Object.keys(body).sort()).toEqual(
-        expect.arrayContaining(["max_tokens", "messages", "model"]),
-      );
+      expect(Object.keys(body).sort()).toEqual(expect.arrayContaining(["max_tokens", "messages", "model"]));
       expect(body).not.toHaveProperty("output_config");
       expect(body).not.toHaveProperty("thinking");
       expect(body).not.toHaveProperty("tool_choice");
@@ -108,7 +111,10 @@ describe("runDiagnostics", () => {
         { type: "tool_use", id: expect.any(String), name: "get_project_status", input: { project: "Atlas" } },
       ],
     });
-    expect(followUp.messages[2].content[0]).toMatchObject({ type: "tool_result", content: "Status projektu: ZIELONY-abc12345" });
+    expect(followUp.messages[2].content[0]).toMatchObject({
+      type: "tool_result",
+      content: "Status projektu: ZIELONY-abc12345",
+    });
     // The tool definitions must not change between the turns of one conversation.
     expect(followUp.tools).toEqual(endpoint.requests[0]?.body.tools);
   });

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.web-test.tsbuildinfo",
+    "lib": ["ES2025", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    // The tests of the web app run in Node under jsdom, so they see the DOM and Node at once. The app modules
+    // they import are checked here a second time, and with Node's types setTimeout() no longer returns a number.
+    "types": ["vite/client", "node"]
+  },
+  // The declaration files belong here as well: an app module that a test imports may rely on a global
+  // that one of them declares.
+  "include": ["src/web/**/*.test.ts", "src/web/**/*.test.tsx", "src/web/test", "src/web/**/*.d.ts"]
+}
