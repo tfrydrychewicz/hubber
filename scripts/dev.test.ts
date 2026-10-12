@@ -19,7 +19,11 @@ import {
   spawnNode,
   TEST_WORKSPACE,
 } from "../src/server/testing.ts";
-import { createTestWorkspace, type TestWorkspace } from "../src/server/workspace/testing.ts";
+import {
+  createTestWorkspace,
+  createUnmigratedTestWorkspace,
+  type TestWorkspace,
+} from "../src/server/workspace/testing.ts";
 
 const HOST = "127.0.0.1";
 const READY = "Hubber działa w trybie deweloperskim";
@@ -44,9 +48,14 @@ net.Server.prototype.close = function (callback) {
 `;
 
 // Loaded into the runner ahead of its own code. Every wait of a second or more passes twenty
-// times faster, so that no test has to sit through the grace period.
-const FAST_CLOCK = `const { setTimeout: wait } = globalThis;
-globalThis.setTimeout = (callback, ms, ...args) => wait(callback, ms >= 1000 ? ms / 20 : ms, ...args);
+// times faster, so that no test has to sit through the grace period. With "until" in the address
+// this module is loaded from, only for as long as the file named there does not exist: a wait
+// that begins afterwards takes its real time.
+const FAST_CLOCK = `import { existsSync } from "node:fs";
+const until = new URL(import.meta.url).searchParams.get("until");
+const fast = (ms) => ms >= 1000 && (until === null || !existsSync(until));
+const { setTimeout: wait } = globalThis;
+globalThis.setTimeout = (callback, ms, ...args) => wait(callback, fast(ms) ? ms / 20 : ms, ...args);
 `;
 
 // Loaded into the runner ahead of its own code. On SIGUSR2 the runner's clock jumps an hour
@@ -58,6 +67,23 @@ const JUMP_AHEAD = `const { now } = Date;
 let ahead = 0;
 Date.now = () => now() + ahead;
 process.on("SIGUSR2", () => setTimeout(() => (ahead = 3_600_000), 150));
+`;
+
+// Loaded into the runner ahead of its own code. The runner's clock stands still. On SIGUSR2 it
+// goes ahead by the next of the steps, in milliseconds, that are named in the address this module
+// is loaded from. Each step, and each SIGINT that reaches the runner, is said on stderr with the
+// time it came at: a test waits for that line, so the runner has dealt with one signal before the
+// next is sent, and how far apart the runner sees two signals is what the test set and no matter
+// of how busy the machine is. The line about a SIGINT comes first: this listener is the older one.
+const STEPPED_CLOCK = `const steps = new URL(import.meta.url).searchParams.getAll("step").map(Number);
+const start = Date.now();
+let ahead = 0;
+Date.now = () => start + ahead;
+process.on("SIGUSR2", () => {
+  ahead += steps.shift() ?? 0;
+  console.error(\`Clock at \${ahead} ms.\`);
+});
+process.on("SIGINT", () => console.error(\`SIGINT at \${ahead} ms.\`));
 `;
 
 // Loaded into every process of a session; it acts in the one that runs the script named in
@@ -119,6 +145,31 @@ const names = Object.keys(process.env).filter((name) => name.startsWith("ANTHROP
 if (isMainThread) console.log(\`${SDK_VARIABLES} \${JSON.stringify(names.sort())}\`);
 `;
 
+// Loaded into every process of a session; it acts in the one that prints a line on stderr which
+// begins with the words named in the address this module is loaded from: the API server, for a
+// line about its migration. The process stops there, in the call that printed the line, and so
+// without a turn of its event loop, as it is inside a migration. It goes on once the file exists
+// that the address names. With "say" in the address, it prints that line before it stops: a line
+// of a server that is at its migration. With "then" in the address, it stops once more at the line
+// that begins with those words, for a third of a second: a server that takes a moment after its
+// migration. Or for as many milliseconds as "thenFor" says: a server that hangs there.
+const HOLD_AT_LINE = `import { existsSync } from "node:fs";
+const options = new URL(import.meta.url).searchParams;
+const cell = new Int32Array(new SharedArrayBuffer(4));
+const { error } = console;
+console.error = (...args) => {
+  error(...args);
+  const line = String(args[0]);
+  if (line.startsWith(options.get("line"))) {
+    if (options.has("say")) error(options.get("say"));
+    while (!existsSync(options.get("until"))) Atomics.wait(cell, 0, 0, 20);
+  }
+  if (options.has("then") && line.startsWith(options.get("then"))) {
+    Atomics.wait(cell, 0, 0, Number(options.get("thenFor") ?? 350));
+  }
+};
+`;
+
 // The two servers of a session: the script each one runs, and the variable that holds its port.
 const SERVERS = {
   api: { script: "src/server/main.ts", port: "HUBBER_PORT" },
@@ -148,11 +199,15 @@ let workDir: string;
 let takePortsAfterCheck: string;
 let fastClock: string;
 let jumpAhead: string;
+let steppedClock: string;
 let startLate: string;
 let reportStarts: string;
 let reportSdkVariables: string;
+let holdAtLine: string;
 // The throwaway workspace that every session of this file opens unless the test names another.
 let workspace: TestWorkspace;
+// The workspaces of single tests, removed after each.
+const workspaces: TestWorkspace[] = [];
 // Stands in for the home directory of the owner, for a session that is given one. It holds nothing.
 let emptyHome: string;
 
@@ -161,15 +216,19 @@ beforeAll(() => {
   takePortsAfterCheck = join(workDir, "take-ports-after-check.mjs");
   fastClock = join(workDir, "fast-clock.mjs");
   jumpAhead = join(workDir, "jump-ahead.mjs");
+  steppedClock = join(workDir, "stepped-clock.mjs");
   startLate = join(workDir, "start-late.mjs");
   reportStarts = join(workDir, "report-starts.mjs");
   reportSdkVariables = join(workDir, "report-sdk-variables.mjs");
+  holdAtLine = join(workDir, "hold-at-line.mjs");
   writeFileSync(takePortsAfterCheck, TAKE_PORTS_AFTER_CHECK);
   writeFileSync(fastClock, FAST_CLOCK);
   writeFileSync(jumpAhead, JUMP_AHEAD);
+  writeFileSync(steppedClock, STEPPED_CLOCK);
   writeFileSync(startLate, START_LATE);
   writeFileSync(reportStarts, REPORT_STARTS);
   writeFileSync(reportSdkVariables, REPORT_SDK_VARIABLES);
+  writeFileSync(holdAtLine, HOLD_AT_LINE);
   workspace = createTestWorkspace();
   emptyHome = join(workDir, "home");
   mkdirSync(emptyHome);
@@ -193,6 +252,7 @@ afterEach(async () => {
   }
   started = undefined;
   seen = [];
+  for (const created of workspaces.splice(0)) created.remove();
   await occupied?.release();
   occupied = undefined;
   fakeApi?.closeAllConnections();
@@ -603,6 +663,405 @@ describe("scripts/dev.ts", { timeout: TEST_TIMEOUT_MS }, () => {
       expect(seen.filter(isAlive)).toEqual([]);
     },
   );
+
+  // A server that has to bring the database of its workspace up to date answers nobody until it
+  // has, and says so before and after. In the next two tests the API server of the session is
+  // kept at one of the two lines for as long as the test needs; see HOLD_AT_LINE. That a refusal
+  // ends the session, also one that follows such a line, is what the tests of the refusals show.
+  describe("with a workspace whose database has to be migrated", () => {
+    const NOTICE = "[api] Baza workspace'u wymaga aktualizacji";
+    const DONE = "[api] Baza zaktualizowana. Kopia sprzed aktualizacji:";
+    const GAVE_UP = "Serwer API nie wystartował w ciągu 15 s. Sprawdź komunikaty powyżej.";
+    let holds = 0;
+
+    /** A throwaway workspace as it was created before the application had a schema: the first start of a server migrates it. */
+    function unmigratedWorkspace(): TestWorkspace {
+      const created = createUnmigratedTestWorkspace();
+      workspaces.push(created);
+      return created;
+    }
+
+    /**
+     * An environment in which the API server stops at the line that begins with the given words,
+     * as deaf as it is inside a migration, until the returned function is called; and, if asked,
+     * once more at a later line: for a moment, or for as long as it is told. With a line to say,
+     * the server prints it where it stops first.
+     */
+    function heldAt(
+      words: string,
+      thenAt?: string,
+      thenForMs?: number,
+      saying?: string,
+    ): { env: Record<string, string>; release: () => void; released: string } {
+      const released = join(workDir, `released-${++holds}`);
+      const standIn = pathToFileURL(holdAtLine);
+      standIn.searchParams.set("line", words);
+      standIn.searchParams.set("until", released);
+      if (thenAt !== undefined) standIn.searchParams.set("then", thenAt);
+      if (thenForMs !== undefined) standIn.searchParams.set("thenFor", String(thenForMs));
+      if (saying !== undefined) standIn.searchParams.set("say", saying);
+      return {
+        env: { NODE_OPTIONS: `--import=${standIn.href}` },
+        release: () => writeFileSync(released, ""),
+        released,
+      };
+    }
+
+    /** Lets the time that the runner gives its servers run out, and waits until it has had every chance to say so. */
+    async function letTheTimeRunOut(runner: SpawnedNode): Promise<void> {
+      runner.child.kill("SIGUSR2");
+      // The jump of the clock comes 150 ms after the signal; the runner looks at its servers ten times a second.
+      await new Promise((resolve) => setTimeout(resolve, 550));
+    }
+
+    it("does not count the time of the migration against the server, and calls itself ready once it is up", async () => {
+      const unmigrated = unmigratedWorkspace();
+      // Held at its migration, and then slow for a moment after it: the time the server is given
+      // begins anew when the migration is over, and is not what was left of it before.
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji", "Baza zaktualizowana.");
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(jumpAhead).href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      // Both in lines that the runner has passed on: the server is at its migration, and Vite is up.
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      await letTheTimeRunOut(runner);
+      seen = descendants(pidOf(runner));
+
+      // Still waiting: no verdict of either kind.
+      expect(runner.stdout()).not.toContain("[dev]");
+
+      hold.release();
+      await written(runner, "ready line", (stdout) => stdout.includes(READY));
+      expect(runner.stderr()).toContain(DONE);
+      expect(runner.stdout()).not.toContain(GAVE_UP);
+      const health = await fetch(`http://${HOST}:${webPort}/api/health`);
+      expect(await health.json()).toEqual({ status: "ok" });
+
+      runner.child.kill("SIGTERM");
+      expect(await ended(runner)).toEqual({ code: 0, signal: null });
+      // Migrated, with its copy, and closed.
+      expect(readdirSync(unmigrated.dir).sort()).toEqual(["backups", "files", "hubber.sqlite", "workspace.json"]);
+    });
+
+    it("counts the time again once the migration is done: a server that hangs afterwards is reported", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza zaktualizowana.");
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(jumpAhead).href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "line after the migration", () => runner.stderr().includes(DONE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      runner.child.kill("SIGUSR2");
+
+      await written(runner, "line of the runner's own", (stdout) => stdout.includes("[dev]"));
+      seen = descendants(pidOf(runner));
+      expect(runner.stdout()).toContain(`[dev] ${GAVE_UP}`);
+      // The session goes on, as for any server that is slow to start.
+      hold.release();
+      runner.child.kill("SIGTERM");
+      expect(await ended(runner)).toEqual({ code: 0, signal: null });
+      expect(runner.stdout()).not.toContain(READY);
+    });
+
+    // The server has just said that Ctrl-C will work once the migration is done. A runner that
+    // killed what has not stopped within its grace period would make that untrue.
+    const WAITING =
+      "[dev] Serwer API aktualizuje bazę workspace'u; czekam, aż skończy. Ponowne Ctrl-C zatrzyma go od razu, a przerwana aktualizacja nie zmienia bazy.";
+    const FORCED = "Wymuszam zamknięcie.";
+
+    it("waits for a migration that it is asked to stop in the middle of, however long, and then stops in order", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji");
+      // The grace period passes twenty times faster for as long as the server is held.
+      const fastWhileHeld = pathToFileURL(fastClock);
+      fastWhileHeld.searchParams.set("until", hold.released);
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", fastWhileHeld.href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+
+      // One Ctrl-C as it arrives under npm: from the terminal, and a moment later from npm.
+      runner.child.kill("SIGINT");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      runner.child.kill("SIGINT");
+      await written(runner, "line about the wait", (stdout) => stdout.includes(WAITING));
+      // Longer than a grace period of the fast clock.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      expect(runner.child.exitCode).toBeNull();
+      expect(runner.stdout()).not.toContain(FORCED);
+      // The server is still at its migration: it was neither killed nor told twice.
+      expect(seen.filter(isAlive).length).toBeGreaterThanOrEqual(2);
+
+      hold.release();
+      // The migration ends, the server shuts down as it was asked to, and nothing had to be killed.
+      expect(await ended(runner)).toEqual({ code: 0, signal: null });
+      expect(runner.stderr()).toContain(DONE);
+      expect(runner.stdout()).toContain("Zamykanie serwera…");
+      expect(runner.stdout()).not.toContain(FORCED);
+      expect(runner.stdout()).not.toContain("API nasłuchuje");
+      expect(seen.filter(isAlive)).toEqual([]);
+      // Migrated, with its copy, and closed.
+      expect(readdirSync(unmigrated.dir).sort()).toEqual(["backups", "files", "hubber.sqlite", "workspace.json"]);
+    });
+
+    it("gives the server its time to stop from the end of the migration, and kills one that hangs after it", async () => {
+      const unmigrated = unmigratedWorkspace();
+      // Held at its migration, and then deaf for good at the line that ends it.
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji", "Baza zaktualizowana.", 60_000);
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(fastClock).href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+      runner.child.kill("SIGINT");
+      // The grace period of the stop runs out while the server migrates, and nothing is killed for it.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(runner.stdout()).not.toContain(FORCED);
+
+      hold.release();
+
+      // A new grace period from the end of the migration, and at its end what is still there is killed.
+      expect(await ended(runner)).toEqual({ code: 1, signal: null });
+      expect(runner.stderr()).toContain(DONE);
+      expect(runner.stdout()).toContain(`[dev] Procesy nie zakończyły się w ciągu 5 s. ${FORCED}`);
+      await vi.waitFor(() => expect(seen.filter(isAlive)).toEqual([]));
+      // The migration itself was not cut short: it had committed before the server hung.
+      expect(readdirSync(unmigrated.dir)).toContain("backups");
+    });
+
+    it("stops a migration at once when it is asked a second time", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji");
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, { env: { ...unmigrated.env, ...hold.env } });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+      runner.child.kill("SIGINT");
+      await written(runner, "line about the wait", (stdout) => stdout.includes(WAITING));
+
+      // Later than the echo of one Ctrl-C would come: somebody pressed it again.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const askedAgainAt = performance.now();
+      runner.child.kill("SIGINT");
+
+      // What had to be killed did not shut down: the stop has failed, whoever asked for it.
+      expect(await ended(runner)).toEqual({ code: 1, signal: null });
+      expect(performance.now() - askedAgainAt).toBeLessThan(3_000);
+      expect(runner.stdout()).toContain(`[dev] Ponowne żądanie zatrzymania. ${FORCED}`);
+      await vi.waitFor(() => expect(seen.filter(isAlive)).toEqual([]));
+      // The migration was cut off before its first statement: the database holds what it held.
+      expect(readdirSync(unmigrated.dir)).not.toContain("backups");
+    });
+
+    /**
+     * A runner whose clock the test moves, see STEPPED_CLOCK: step() takes the next of the steps and
+     * interrupt() sends a SIGINT, and each resolves once the runner has said that it got that far.
+     */
+    function clockInSteps(...steps: number[]) {
+      const standIn = pathToFileURL(steppedClock);
+      for (const step of steps) standIn.searchParams.append("step", String(step));
+      const left = [...steps];
+      let at = 0;
+      const said = (runner: SpawnedNode, line: string) =>
+        written(runner, `line "${line}"`, () => runner.stderr().includes(line));
+      return {
+        nodeArgs: ["--import", standIn.href],
+        step: async (runner: SpawnedNode) => {
+          at += left.shift() ?? 0;
+          runner.child.kill("SIGUSR2");
+          await said(runner, `Clock at ${at} ms.`);
+        },
+        interrupt: async (runner: SpawnedNode) => {
+          runner.child.kill("SIGINT");
+          await said(runner, `SIGINT at ${at} ms.`);
+        },
+      };
+    }
+
+    /** What the runner has made of the signals so far has reached this process a moment after the runner said that it got them. */
+    const aMoment = () => new Promise((resolve) => setTimeout(resolve, 200));
+
+    it("takes a signal for a new request only after half a second without any: a key that is held down asks once", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji");
+      // What a terminal sends for Ctrl-C held for most of a second, with the usual repeat of a
+      // keyboard; then a signal just inside half a second after the one before, and one just outside.
+      const clock = clockInSteps(375, 90, 90, 90, 499, 500);
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: clock.nodeArgs,
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+      await clock.interrupt(runner);
+      await written(runner, "line about the wait", (stdout) => stdout.includes(WAITING));
+
+      // All but the first of these come later than half a second after the stop began, and each
+      // of them sooner than that after the signal before it.
+      for (let signal = 0; signal < 5; signal++) {
+        await clock.step(runner);
+        await clock.interrupt(runner);
+      }
+      await aMoment();
+
+      expect(runner.child.exitCode).toBeNull();
+      expect(runner.stdout()).not.toContain(FORCED);
+      // The server is still at its migration.
+      expect(seen.filter(isAlive).length).toBeGreaterThanOrEqual(2);
+
+      // Half a second of silence, and then a signal: somebody asks again.
+      await clock.step(runner);
+      await clock.interrupt(runner);
+
+      expect(await ended(runner)).toEqual({ code: 1, signal: null });
+      expect(runner.stdout()).toContain(`[dev] Ponowne żądanie zatrzymania. ${FORCED}`);
+      await vi.waitFor(() => expect(seen.filter(isAlive)).toEqual([]));
+      expect(readdirSync(unmigrated.dir)).not.toContain("backups");
+    });
+
+    it("does not take a Ctrl-C for a second request when it comes within half a second of a stop that began by itself", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji");
+      const clock = clockInSteps(499, 500);
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: clock.nodeArgs,
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+      // The stop begins without a signal: one of the two servers is gone.
+      process.kill(viteOf({ ...runner, apiPort, webPort }), "SIGKILL");
+      await written(runner, "line about the wait", (stdout) => stdout.includes(WAITING));
+
+      // Whoever pressed the key at this moment had asked for nothing before, and had not read that line.
+      await clock.step(runner);
+      await clock.interrupt(runner);
+      await aMoment();
+      expect(runner.child.exitCode).toBeNull();
+      expect(runner.stdout()).not.toContain(FORCED);
+
+      // Later it ends the wait, as the line has said that it would.
+      await clock.step(runner);
+      await clock.interrupt(runner);
+
+      expect(await ended(runner)).toEqual({ code: 1, signal: null });
+      expect(runner.stdout()).toContain(
+        "[dev] Proces web zakończył się nieoczekiwanie (SIGKILL). Zatrzymuję pozostałe.",
+      );
+      expect(runner.stdout()).toContain(`[dev] Ponowne żądanie zatrzymania. ${FORCED}`);
+      await vi.waitFor(() => expect(seen.filter(isAlive)).toEqual([]));
+    });
+
+    // The server is not the runner's child but the watcher's: that it ended by itself, the runner
+    // knows from the line that the watcher of Node prints then.
+    it("stops holding the time, and waits for no migration at a stop, once the server has died in the middle of one", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji");
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(jumpAhead).href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      seen = descendants(pidOf(runner));
+      const [watcher] = children(pidOf(runner)).filter((pid) => commandOf(pid).includes(" --watch "));
+      const [server] = watcher === undefined ? [] : children(watcher);
+      if (server === undefined) throw new Error(`The watcher runs no server.\n${runner.stdout()}${runner.stderr()}`);
+
+      // Killed outright: no line of the server says how its migration ended.
+      process.kill(server, "SIGKILL");
+      await written(runner, "line of the watcher about a server that ended", (stdout) =>
+        stdout.includes("[api] Failed running 'src/server/main.ts'."),
+      );
+      runner.child.kill("SIGUSR2");
+
+      // The time counts again, as for any server that does not come up.
+      await written(runner, "line of the runner's own", (stdout) => stdout.includes("[dev]"));
+      expect(runner.stdout()).toContain(`[dev] ${GAVE_UP}`);
+      // And a stop is a stop of what is left: nothing migrates, so there is nothing to wait for.
+      runner.child.kill("SIGINT");
+      expect(await ended(runner)).toEqual({ code: 0, signal: null });
+      expect(runner.stdout()).not.toContain(WAITING);
+      expect(runner.stdout()).not.toContain(FORCED);
+      expect(seen.filter(isAlive)).toEqual([]);
+      expect(readdirSync(unmigrated.dir)).not.toContain("backups");
+    });
+
+    // The watcher's line begins with its words. A line of the server that holds them behind other
+    // text says nothing of a server that is gone: the one that printed it is still at its migration.
+    it("goes on holding the time when a line of the server holds the watcher's words behind other text", async () => {
+      const unmigrated = unmigratedWorkspace();
+      const quoting = "Uwaga: \"Failed running 'src/server/main.ts'.\" to komunikat Node.";
+      const hold = heldAt("Baza workspace'u wymaga aktualizacji", undefined, undefined, quoting);
+      const [apiPort, webPort] = await freePorts(2);
+
+      const runner = startRunner(apiPort, webPort, {
+        nodeArgs: ["--import", pathToFileURL(jumpAhead).href],
+        env: { ...unmigrated.env, ...hold.env },
+      });
+      // In lines that the runner has passed on: the server is at its migration and has said the line.
+      await written(runner, "notice of the migration", () => runner.stderr().includes(NOTICE));
+      await written(runner, "line that quotes the watcher", () => runner.stderr().includes(`[api] ${quoting}`));
+      await written(runner, "address of Vite", (stdout) => stdout.includes(`http://${HOST}:${webPort}/`));
+      await letTheTimeRunOut(runner);
+      seen = descendants(pidOf(runner));
+
+      // Still waiting: a runner that took the line for the watcher's would have given the server up by now.
+      expect(runner.stdout()).not.toContain("[dev]");
+
+      hold.release();
+      await written(runner, "ready line", (stdout) => stdout.includes(READY));
+      expect(runner.stdout()).not.toContain(GAVE_UP);
+      runner.child.kill("SIGTERM");
+      expect(await ended(runner)).toEqual({ code: 0, signal: null });
+    });
+  });
+
+  // What the test of a server that died rests on: the words of Node's watcher for a script that
+  // ended by itself with anything but code 0. A version of Node that words them otherwise shows
+  // here, and not as a runner that waits for good.
+  it.each([
+    ["ends with a code other than 0", "ended-badly", "process.exit(3);", "Failed running"],
+    ["is killed", "killed", 'process.kill(process.pid, "SIGKILL");', "Failed running"],
+  ])("goes by the words of Node's watcher for a script that %s", async (_how, name, source, words) => {
+    const script = join(workDir, `${name}.mjs`);
+    writeFileSync(script, source);
+
+    const watching = spawnNode(script, { nodeArgs: ["--watch", "--watch-preserve-output"] });
+    started = watching;
+    await written(watching, "line of the watcher", (stdout) => stdout.includes("\n"));
+
+    expect(watching.stdout().split("\n")[0]).toBe(
+      `${words} '${script}'. Waiting for file changes before restarting...`,
+    );
+  });
 
   it.each(["HUBBER_PORT", "HUBBER_WEB_PORT"] as const)(
     "refuses to start when %s names a busy port, and names the process that holds it",

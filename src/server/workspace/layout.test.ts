@@ -4,12 +4,13 @@ import { describe, expect, it } from "vitest";
 import { REPOSITORY_ROOT, workspacePaths } from "./layout.ts";
 
 describe("workspacePaths", () => {
-  it("names the three things a workspace directory holds", () => {
+  it("names the three things a workspace directory holds, and the place of the copies made before a migration", () => {
     expect(workspacePaths("/data/praca")).toEqual({
       dir: "/data/praca",
       config: "/data/praca/workspace.json",
       database: "/data/praca/hubber.sqlite",
       files: "/data/praca/files",
+      backups: "/data/praca/backups",
     });
   });
 });

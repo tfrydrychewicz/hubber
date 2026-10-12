@@ -14,13 +14,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { pendingMigrations, readMigrations } from "../db/migrate.ts";
 import { TEST_WORKSPACE } from "../testing.ts";
+import { snapshotWorkspaceDatabase } from "./database.ts";
 import { WorkspaceError } from "./errors.ts";
 import { locateWorkspace } from "./location.ts";
 import { type OpenWorkspace, openWorkspace } from "./open.ts";
 import {
   createTestWorkspace,
   createTestWorkspaceAt,
+  createUnmigratedTestWorkspace,
   scanWorkspaceForSecret,
   spellingsOf,
   TEST_PROFILE,
@@ -137,6 +140,67 @@ describe("createTestWorkspace", () => {
 
   it("removes the workspace with the directory it was made in, as often as it is asked", () => {
     const created = createTestWorkspace();
+
+    created.remove();
+    created.remove();
+
+    expect(existsSync(dirname(created.dir))).toBe(false);
+  });
+
+  it("gives its database the schema of this code: a server that opens it has nothing to migrate", () => {
+    const { dir } = workspace();
+
+    const found = open(dir);
+
+    expect(found.migration).toEqual({ applied: [], snapshot: null });
+    expect(pendingMigrations(found.database)).toEqual([]);
+  });
+});
+
+describe("createUnmigratedTestWorkspace", () => {
+  function unmigrated(...profile: Parameters<typeof createUnmigratedTestWorkspace>): TestWorkspace {
+    const created = createUnmigratedTestWorkspace(...profile);
+    workspaces.push(created);
+    return created;
+  }
+
+  it("creates a throwaway workspace whose database holds the pin and nothing else", () => {
+    const { dir, env } = unmigrated();
+
+    expect(dir.startsWith(tmpdir())).toBe(true);
+    expect(readdirSync(dir).sort()).toEqual(LAYOUT);
+    expect(env).toEqual({ HUBBER_WORKSPACE: dir });
+    const db = new Database(join(dir, "hubber.sqlite"));
+    connections.push(db);
+    expect(db.prepare("SELECT type, name FROM sqlite_schema ORDER BY name").all()).toEqual([
+      { type: "table", name: "workspace_pin" },
+      { type: "trigger", name: "workspace_pin_insert_once" },
+      { type: "trigger", name: "workspace_pin_no_delete" },
+      { type: "trigger", name: "workspace_pin_no_update" },
+    ]);
+    expect(db.pragma("user_version", { simple: true })).toBe(1);
+    expect(db.prepare("SELECT endpoint FROM workspace_pin").pluck().get()).toBe(TEST_WORKSPACE.endpoint);
+  });
+
+  it("is the same workspace otherwise: its name, its profile, and another profile where a test needs one", () => {
+    const usual = open(unmigrated().dir);
+    const other = open(unmigrated({ endpoint: "https://router.corp.example/llm" }).dir);
+
+    expect(usual.config).toMatchObject({ name: TEST_WORKSPACE.name, profile: TEST_PROFILE });
+    expect(other.config.profile).toEqual({ ...TEST_PROFILE, endpoint: "https://router.corp.example/llm" });
+  });
+
+  it("is migrated by the first open, which leaves a copy of what it was", () => {
+    const { dir } = unmigrated();
+
+    const found = open(dir);
+
+    expect(found.migration.applied).toEqual(readMigrations().map(({ tag }) => tag));
+    expect(readdirSync(join(dir, "backups"))).toHaveLength(1);
+  });
+
+  it("removes the workspace with the directory it was made in", () => {
+    const created = createUnmigratedTestWorkspace();
 
     created.remove();
     created.remove();
@@ -316,6 +380,65 @@ describe("scanWorkspaceForSecret", () => {
     expect(findings.filter((finding) => finding.where === `${file}: notes.body`)).toHaveLength(rows);
     // The file is not a workspace database at all: the scan does not depend on the pin.
     expect(findings.filter((finding) => finding.where === file)).toEqual([{ where: file, spelling: "utf-8" }]);
+  });
+
+  it("finds through SQL a secret that only a copy from before a migration still holds", () => {
+    const { dir } = workspace();
+    const found = open(dir);
+    const file = join(dir, "hubber.sqlite");
+    const copy = join(dir, "backups", "before-0002_next-20261011T120000000Z.sqlite");
+    // A note that the owner removes later; the copy was made while it was there.
+    found.database
+      .prepare("INSERT INTO persons (id, name, name_norm, is_me, created_at, note) VALUES (?, ?, ?, 0, ?, ?)")
+      .run("per_anna", "Anna", "anna", "2026-10-12T09:00:00.000Z", `before ${SECRET} after`);
+    mkdirSync(join(dir, "backups"));
+    snapshotWorkspaceDatabase(found.database, copy);
+    found.database.exec("DELETE FROM persons");
+    found.close();
+    const before = fingerprint(dir);
+
+    const findings = scanWorkspaceForSecret(dir, SECRET);
+
+    // Gone from the database, by its bytes and through SQL; the copy has it, and is read both ways too.
+    expect(findings).toEqual([
+      { where: copy, spelling: "utf-8" },
+      { where: `${copy}: persons.note`, spelling: "utf-8" },
+    ]);
+    expect(copiesIn(file, SECRET)).toBe(0);
+    expect(fingerprint(dir)).toEqual(before);
+    expect(readdirSync(join(dir, "backups"))).toEqual(["before-0002_next-20261011T120000000Z.sqlite"]);
+  });
+
+  it("reads every copy through SQL, and does not take other files there for databases", () => {
+    const { dir } = workspace();
+    const found = open(dir);
+    const backups = join(dir, "backups");
+    mkdirSync(backups);
+    // Values that the bytes of a file do not all show whole: longer than a page, each is cut into
+    // pieces, and the secret is moved through them in steps shorter than itself, across a whole page.
+    found.database.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL) STRICT");
+    const insert = found.database.prepare("INSERT INTO notes (body) VALUES (?)");
+    const rows = 105;
+    // In one transaction: every commit of this connection waits for the drive.
+    found.database.transaction(() => {
+      for (let step = 0; step < rows; step++) {
+        insert.run(`${"a".repeat(4500 + 40 * step)}${SECRET}${"b".repeat(4200 - 40 * step)}`);
+      }
+    })();
+    snapshotWorkspaceDatabase(found.database, join(backups, "first.sqlite"));
+    snapshotWorkspaceDatabase(found.database, join(backups, "second.sqlite"));
+    writeFileSync(join(backups, "notes.txt"), "not a database");
+    writeFileSync(join(backups, "third.sqlite.partial"), "a copy that was cut short");
+
+    const findings = scanWorkspaceForSecret(dir, SECRET);
+
+    for (const name of ["first.sqlite", "second.sqlite"]) {
+      const path = join(backups, name);
+      expect(findings.filter((finding) => finding.where === `${path}: notes.body`)).toHaveLength(rows);
+      expect(copiesIn(path, SECRET)).toBeLessThan(rows);
+    }
+    expect(findings.some((finding) => finding.where.includes("notes.txt"))).toBe(false);
+    expect(findings.some((finding) => finding.where.includes("third.sqlite.partial"))).toBe(false);
   });
 
   it("finds a secret in a value of any spelling and of any type that can hold one", () => {

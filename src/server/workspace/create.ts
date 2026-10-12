@@ -23,6 +23,7 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { MigrationError, MigrationFilesError, migrateDatabase } from "../db/migrate.ts";
 import { EXIT_FAILURE } from "../exit-codes.ts";
 import {
   CONFIG_SCHEMA_VERSION,
@@ -33,8 +34,13 @@ import {
   type WorkspaceConfig,
   WorkspaceConfigError,
 } from "./config.ts";
-import { createWorkspaceDatabase, WorkspaceDatabaseError, type WorkspacePin } from "./database.ts";
-import { WorkspaceError } from "./errors.ts";
+import {
+  createWorkspaceDatabase,
+  openWorkspaceDatabase,
+  WorkspaceDatabaseError,
+  type WorkspacePin,
+} from "./database.ts";
+import { unusableMigrations, WorkspaceError } from "./errors.ts";
 import { CONFIG_FILE, DATABASE_FILE, FILES_DIR, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from "./layout.ts";
 
 export interface CreateWorkspaceOptions {
@@ -49,8 +55,8 @@ export interface CreateWorkspaceOptions {
 export interface CreateWorkspaceDeps {
   now: () => Date;
   /**
-   * Creates the empty database with the pin in it and closes it, leaving exactly one file.
-   * Synchronous, like the rest of the creation.
+   * Creates the database with the pin in it, at the schema of this code, and closes it, leaving
+   * exactly one file. Synchronous, like the rest of the creation.
    */
   createDatabase: (file: string, pin: WorkspacePin) => void;
   /** The random part of the staging directory's name. */
@@ -66,6 +72,22 @@ const STAGING_GRACE_MS = 60_000;
 
 function stagingPrefix(dir: string): string {
   return `.${basename(dir)}.creating-`;
+}
+
+/**
+ * The database of a new workspace: the pin, and on it the schema of this code, so that only a
+ * workspace of an earlier version is migrated when the server opens it. Without a copy first:
+ * there is nothing in the file to protect yet.
+ */
+function createCurrentDatabase(file: string, pin: WorkspacePin): void {
+  createWorkspaceDatabase(file, pin);
+  const db = openWorkspaceDatabase(file, pin.endpoint);
+  try {
+    migrateDatabase(db, { snapshotDir: null });
+  } finally {
+    // Closed whatever became of the migration: an open database has files beside it.
+    db.close();
+  }
 }
 
 function exists(path: string): boolean {
@@ -129,6 +151,27 @@ function identityOf(path: string): string {
   return `${dev}:${ino}`;
 }
 
+/**
+ * The code with which SQLite refused, whichever error carries it: the one of the database file,
+ * or SQLite's own, which the runner passes on for what is no statement of a migration, the commit
+ * for one. undefined for any other error.
+ */
+function sqliteCodeOf(error: unknown): string | undefined {
+  if (error instanceof WorkspaceDatabaseError) return error.sqliteCode;
+  const { code } = (error ?? {}) as { code?: unknown };
+  return typeof code === "string" && code.startsWith("SQLITE_") ? code : undefined;
+}
+
+/**
+ * What follows a code of SQLite in the reason of a failed creation: for a disk without room, what
+ * the code means and what to do.
+ */
+function afterSqliteCode(code: string | undefined): string {
+  return code?.startsWith("SQLITE_FULL")
+    ? ", bo na dysku zabrakło miejsca. Zwolnij miejsce albo wskaż inny katalog opcją --dir"
+    : "";
+}
+
 function alreadyExists(dir: string): WorkspaceError {
   return new WorkspaceError(
     `Katalog "${dir}" już istnieje. Polecenie tworzy wyłącznie nowy katalog i niczego nie nadpisuje; wskaż inny opcją --dir.`,
@@ -151,15 +194,15 @@ function check(dir: string, config: WorkspaceConfig): void {
 }
 
 /**
- * Creates the directory, the configuration file, the empty database and the directory for
- * files. Returns the configuration it wrote. Throws WorkspaceError, with nothing left behind,
- * when the target exists or the creation fails on the way.
+ * Creates the directory, the configuration file, the database without rows at the schema of this
+ * code, and the directory for files. Returns the configuration it wrote. Throws WorkspaceError,
+ * with nothing left behind, when the target exists or the creation fails on the way.
  */
 export function createWorkspace(
   options: CreateWorkspaceOptions,
   {
     now = () => new Date(),
-    createDatabase = createWorkspaceDatabase,
+    createDatabase = createCurrentDatabase,
     token = () => randomBytes(4).toString("hex"),
   }: Partial<CreateWorkspaceDeps> = {},
 ): WorkspaceConfig {
@@ -246,12 +289,21 @@ export function createWorkspace(
       }
     }
     if (error instanceof WorkspaceError) throw error;
+    // What SQLite says is given by its code: its own sentence is English, and the error of the
+    // database file names the staging directory, which is gone by now.
+    const sqliteCode = sqliteCodeOf(error);
     const reason =
       error instanceof WorkspaceDatabaseError && error.problem === "wal-unavailable"
         ? "dysk nie obsługuje trybu WAL bazy SQLite. Utwórz workspace na dysku lokalnym"
-        : error instanceof Error
-          ? error.message
-          : String(error);
+        : error instanceof MigrationError
+          ? `nie udało się założyć schematu bazy (migracja ${error.facts.tag}: ${error.facts.code ?? error.problem})${afterSqliteCode(error.facts.code)}`
+          : error instanceof MigrationFilesError
+            ? unusableMigrations(error)
+            : sqliteCode !== undefined
+              ? `nie udało się założyć bazy (${sqliteCode})${afterSqliteCode(sqliteCode)}`
+              : error instanceof Error
+                ? error.message
+                : String(error);
     throw new WorkspaceError(`Nie udało się utworzyć workspace'u w katalogu "${dir}": ${reason}`, EXIT_FAILURE);
   }
 }

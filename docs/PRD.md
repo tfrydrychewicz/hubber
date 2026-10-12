@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Wersja robocza 0.1 |
-| **Data** | 2026-10-09 |
+| **Data** | 2026-10-12 |
 | **Nazwa robocza** | Hubber |
 
 ## 1. Streszczenie
@@ -51,6 +51,8 @@ Tracker zespołu (np. Jira lub Linear) pozostaje źródłem prawdy o zadaniach z
 - Wysyłanie czegokolwiek w imieniu użytkownika: agent przygotowuje szkice, nie wysyła.
 - Nagrywanie i transkrypcja spotkań; notatki wpisuje lub wkleja użytkownik.
 - Oceny okresowe i procesy HR.
+- Zarządzanie projektem: automatyczne przeliczanie harmonogramu, ścieżka krytyczna, planowanie zasobów, wersje bazowe planu, pracochłonność. Harmonogram jest obrazem projektu dla menedżera, nie planem pracy zespołu.
+- Kalendarz spotkań: kalendarz projektu pokazuje daty z danych huba; nie pobiera spotkań z kalendarza użytkownika i niczego w nim nie zapisuje.
 
 ## 4. Użytkownik
 
@@ -71,13 +73,14 @@ Wymagania w rozdziale 8 wynikają z tej listy. Funkcja, która nie pomaga odpowi
 | Q1 | Co dziś wymaga mojej uwagi? | widok „Dziś" | P0 |
 | Q2 | Na co czekam, od kogo i jak długo? | widok „Dziś", strona osoby | P0 |
 | Q3 | Co i komu obiecałem, na kiedy? | widok „Dziś", strona osoby | P0 |
-| Q4 | Które projekty są zagrożone i dlaczego? | widok „Dziś", ryzyka na stronie projektu | P0 |
+| Q4 | Które projekty i zadania są zagrożone i dlaczego? | widok „Dziś", ryzyka na stronie itemu | P0 |
 | Q5 | Co się zmieniło w projekcie X od dnia Y? | oś czasu, rozmowa z agentem | P0 |
 | Q6 | O czym ostatnio rozmawiałem z osobą Z i co mam z nią poruszyć? | strona osoby; przygotowanie do spotkania | P0 (historia), P1 (przygotowanie) |
 | Q7 | Kto jest interesariuszem X i czego oczekuje? | strona projektu | P0 |
 | Q8 | Jakie decyzje zapadły w X, kiedy i na jakiej podstawie? | decyzje na stronie projektu | P0 |
 | Q9 | Czego dawno nie ruszałem? | widok „Dziś" | P0 |
 | Q10 | Jaki status mam zaraportować w górę? | szkic statusu | P1 |
+| Q11 | Co i kiedy ma się wydarzyć w projekcie X, co wypada w najbliższych tygodniach i co się przesunęło? | wykres Gantta i kalendarz projektu, oś czasu, rozmowa z agentem | P0 |
 
 ## 6. Zasady produktu
 
@@ -87,7 +90,7 @@ Wymagania w rozdziale 8 wynikają z tej listy. Funkcja, która nie pomaga odpowi
 4. **Każdy fakt ma źródło.** Decyzja, wymaganie czy ryzyko wskazuje materiał i cytat, z którego pochodzi.
 5. **Historia zamiast nadpisywania.** Stan bieżący wynika z historii zmian, więc pytanie „co się zmieniło" zawsze ma odpowiedź.
 6. **Struktura w bazie, proza w edytorze.** To, po czym się filtruje i agreguje, jest polem, a nie fragmentem dokumentu.
-7. **Deterministycznie, gdzie się da.** Listy „zaległe", „czekam" i „bez aktywności" to zapytania do danych, a nie wynik modelu.
+7. **Deterministycznie, gdzie się da.** Listy „zaległe", „czekam" i „bez aktywności", wykres Gantta i kalendarz projektu to zapytania do danych, a nie wynik modelu.
 8. **Tożsamości się nie zgaduje.** Niejednoznaczną osobę lub projekt system rozstrzyga pytaniem.
 9. **Treść użytkownika należy do użytkownika.** Agent nie zmienia słów napisanych przez użytkownika bez jego akceptacji.
 
@@ -99,7 +102,9 @@ Wymagania w rozdziale 8 wynikają z tej listy. Funkcja, która nie pomaga odpowi
 | **Notatka** | Dokument użytkownika, np. ze spotkania, z datą, rodzajem, uczestnikami i treścią. Edytowalna. |
 | **Fragment** | Ciągły zakres treści notatki dotyczący jednego tematu. Jednostka wiązania notatki z itemami. |
 | **Źródło** | Miejsce, z którego pochodzi informacja: wrzutka, fragment notatki, dokument albo polecenie użytkownika. |
-| **Item** | Projekt albo zadanie. Projekty zawierają zadania, zadania mogą mieć podzadania. |
+| **Item** | Projekt albo zadanie. Projekty zawierają zadania, zadania mogą mieć podzadania, a podzadania własne podzadania, na dowolnym poziomie. Podzadanie to zadanie, którego itemem nadrzędnym jest inne zadanie; nie jest osobnym typem itemu. |
+| **Kamień milowy** | Zadanie na dowolnym poziomie hierarchii oznaczone jako punkt w czasie, np. wydanie albo decyzja komitetu: jego dniem jest termin, daty rozpoczęcia nie ma. Oznaczenie jest osobnym polem itemu: po nim agent i użytkownik odróżniają kamień milowy od zwykłego zadania. |
+| **Harmonogram** | Daty rozpoczęcia, terminy i kamienie milowe projektu lub zadania i tego, co zawierają. Ma dwa widoki wyliczane z danych: wykres Gantta i kalendarz projektu. |
 | **Osoba** | Człowiek występujący w materiałach; ma aliasy, rolę i relację do użytkownika. Użytkownik też jest osobą. |
 | **Wzmianka** | Wystąpienie osoby w źródle, powiązane z osobą z katalogu albo nierozstrzygnięte. |
 | **Fakt** | Wyodrębniona informacja o itemie: decyzja, wymaganie, ryzyko, informacja lub pytanie. Zawsze ma źródło i cytat. |
@@ -113,6 +118,7 @@ Relacje:
 - Notatka ma dowolną liczbę uczestników; osoba może być uczestnikiem wielu notatek.
 - Osoba pełni w itemie rolę: właściciel, zleceniodawca, interesariusz, wykonawca lub informowany.
 - Zobowiązanie jest zadaniem. „Ktoś jest mi coś winien" to zadanie z moją rolą `czekam` i właścicielem. „Ja jestem coś winien" to zadanie z moją rolą `robię` i zleceniodawcą.
+- Kamień milowy jest zadaniem: ma status, właściciela, źródła i historię jak każdy item.
 - Fakt należy do jednego itemu i wskazuje jedno źródło. Ten sam cytat może dać fakty w kilku itemach.
 
 ## 8. Wymagania funkcjonalne
@@ -129,7 +135,7 @@ Priorytety: **P0** wchodzi do M1 (MVP), **P1** do M2, **P2** do M3 lub później
 | CAP-4 | Jedno wejście może łączyć materiał i polecenie, np. zrzut ekranu i „dodaj zadanie: odpisać do piątku". Polecenie użytkownika ma pierwszeństwo przed wnioskami agenta. | P0 |
 | CAP-5 | Wrzutka jest zapisywana w oryginale przed jakimkolwiek przetwarzaniem. Nie można jej edytować; można ją trwale usunąć. | P0 |
 | CAP-6 | Dla obrazów system tworzy transkrypcję (uczestnicy, znaczniki czasu, treść) i przechowuje ją obok oryginału. | P0 |
-| CAP-7 | Wrzutka ma datę dodania i datę zdarzenia. Daty względne w treści („jutro", „w piątek") są liczone od daty zdarzenia. Gdy daty zdarzenia nie da się ustalić, system przyjmuje datę dodania i oznacza ją jako przybliżoną. | P0 |
+| CAP-7 | Wrzutka ma datę dodania i datę zdarzenia. Daty względne w treści („jutro", „w piątek") są liczone od daty zdarzenia, a w poleceniu użytkownika od daty dodania. Gdy daty zdarzenia nie da się ustalić, system przyjmuje datę dodania i oznacza ją jako przybliżoną. | P0 |
 | CAP-8 | Zasilenie początkowe: użytkownik wkleja listę osób i projektów, a system proponuje ich utworzenie do zbiorczej akceptacji. | P0 |
 | CAP-9 | Transkrypcję obrazu można poprawić ręcznie. | P1 |
 | CAP-10 | Skrót klawiszowy otwiera pole wejściowe z dowolnego ekranu; można wrzucić wiele plików naraz. | P1 |
@@ -139,14 +145,14 @@ Priorytety: **P0** wchodzi do M1 (MVP), **P1** do M2, **P2** do M3 lub później
 
 | ID | Wymaganie | Priorytet |
 |---|---|---|
-| ING-1 | Z każdej wrzutki i notatki agent wyodrębnia: zadania (w tym zobowiązania w obie strony), fakty (decyzje, wymagania, ryzyka, informacje, pytania), sygnały zmiany statusu oraz wzmianki o osobach. | P0 |
+| ING-1 | Z każdej wrzutki i notatki agent wyodrębnia: zadania (w tym zobowiązania w obie strony), fakty (decyzje, wymagania, ryzyka, informacje, pytania), sygnały zmiany statusu, elementy harmonogramu (SCH-3) oraz wzmianki o osobach. | P0 |
 | ING-2 | Każdy wyodrębniony element jest przypisywany do zera, jednego lub wielu itemów. Jedna wrzutka może dotyczyć wielu itemów. | P0 |
 | ING-3 | Gdy element nie pasuje do istniejącego itemu, agent proponuje nowy item albo zostawia element nieprzypisany. Nie dopasowuje na siłę. | P0 |
 | ING-4 | Przed zaproponowaniem nowego itemu lub osoby agent sprawdza podobne istniejące, także niedawno zamknięte, i pokazuje kandydatów na duplikat. | P0 |
 | ING-5 | Wynikiem przetwarzania jest lista typowanych operacji (Załącznik A). Każda ma uzasadnienie, cytat ze źródła i poziom pewności. | P0 |
 | ING-6 | Pewność jest `wysoka` tylko wtedy, gdy źródło wskazuje cel wprost (nazwa, alias, wzmianka) i dopasowanie jest jednoznaczne. W pozostałych przypadkach jest `niska`. | P0 |
 | ING-7 | Operacje są stosowane zgodnie z polityką opisaną pod tabelą. | P0 |
-| ING-8 | Przed zastosowaniem system sprawdza operację deterministycznie: cytat występuje w źródle, wskazane obiekty istnieją, daty są poprawne. Operacja, która nie przechodzi, wraca do agenta do poprawy; po wyczerpaniu prób trafia do Inboxu jako wymagająca ręcznej decyzji. | P0 |
+| ING-8 | Przed zastosowaniem system sprawdza operację deterministycznie: cytat występuje w źródle, wskazane obiekty istnieją, daty są poprawne, hierarchia pozostaje poprawna (ITM-4). Operacja, która nie przechodzi, wraca do agenta do poprawy; po wyczerpaniu prób trafia do Inboxu jako wymagająca ręcznej decyzji. | P0 |
 | ING-9 | Treść materiału jest danymi, nie poleceniem: instrukcje zawarte we wklejonych wiadomościach i dokumentach nie zmieniają zachowania agenta. | P0 |
 | ING-10 | Nieudane przetwarzanie nie gubi materiału: wrzutka zostaje w stanie „błąd" z możliwością ponowienia, a kolejka przetwarzania przeżywa restart aplikacji. | P0 |
 | ING-11 | Wrzutkę lub notatkę można przetworzyć ponownie na żądanie; system proponuje tylko różnicę względem tego, co już zastosowano. | P0 |
@@ -161,7 +167,7 @@ Priorytety: **P0** wchodzi do M1 (MVP), **P1** do M2, **P2** do M3 lub później
 | Dodanie faktu do istniejącego itemu | od razu | od razu | Inbox |
 | Powiązanie wzmianki z istniejącą osobą | od razu | od razu | Inbox (pytanie) |
 | Utworzenie itemu lub osoby | od razu | Inbox | Inbox |
-| Zmiana statusu, kondycji, terminu, właściciela | od razu | Inbox | Inbox |
+| Zmiana statusu, kondycji, ważności, daty rozpoczęcia, terminu, oznaczenia kamienia milowego, właściciela, itemu nadrzędnego | od razu | Inbox | Inbox |
 | Zamknięcie lub scalenie | od razu | Inbox | Inbox |
 | Zmiana treści napisanej przez użytkownika | sugestia do akceptacji | nigdy | nigdy |
 | Usunięcie | po potwierdzeniu | nigdy | nigdy |
@@ -183,18 +189,19 @@ Operacje zastosowane od razu są widoczne na karcie w Inboxie jako „zastosowan
 
 | ID | Wymaganie | Priorytet |
 |---|---|---|
-| ITM-1 | Item ma: typ (projekt, zadanie), tytuł, aliasy (nazwy potoczne, skróty, klucze), status, moją rolę, właściciela, termin, item nadrzędny, odnośnik zewnętrzny (system, klucz, adres) i opis. | P0 |
-| ITM-2 | Statusy: `do zrobienia`, `w toku`, `zablokowane`, `zrobione`, `anulowane`. Projekt ma dodatkowo kondycję: `zielona`, `żółta`, `czerwona`. | P0 |
+| ITM-1 | Item ma: typ (projekt, zadanie), tytuł, aliasy (nazwy potoczne, skróty, klucze), status, ważność, moją rolę, właściciela, datę rozpoczęcia, termin, oznaczenie kamienia milowego, item nadrzędny, odnośnik zewnętrzny (system, klucz, adres) i opis. | P0 |
+| ITM-2 | Statusy: `do zrobienia`, `w toku`, `zablokowane`, `zrobione`, `anulowane`. Projekt i zadanie mogą mieć ponadto kondycję: `zielona`, `żółta`, `czerwona`; item bez kondycji nie został oceniony. | P0 |
 | ITM-3 | Moja rola: `robię` (wykonuję sam), `deleguję` (wykonuje ktoś z zespołu, odpowiadam ja), `czekam` (ktoś jest mi coś winien), `obserwuję`. | P0 |
-| ITM-4 | Hierarchia ma trzy poziomy: projekt, zadanie, podzadanie. | P0 |
+| ITM-4 | Projekt stoi na szczycie hierarchii i nie ma itemu nadrzędnego. Zadanie jest samodzielne albo ma item nadrzędny: projekt lub inne zadanie; zadanie pod zadaniem to podzadanie. Podzadanie można utworzyć pod zadaniem na każdym poziomie; jedynym ograniczeniem głębokości jest zabezpieczenie przed błędnym zagnieżdżaniem: żaden item nie leży głębiej niż 32 poziomy pod szczytem drzewa. Zmiana itemu nadrzędnego przenosi zadanie razem ze wszystkim, co zawiera; zadania nie można umieścić pod nim samym ani pod żadnym z itemów, które zawiera. Agent zachowuje poziomy, które podaje materiał, a sam nie zagnieżdża głębiej, niż z materiału wynika; propozycja nowego zadania pokazuje ścieżkę itemów nadrzędnych, pod którymi zadanie powstanie. Każdy item ma własny status, własną kondycję, własne daty i własną datę ostatniej aktywności: aplikacja nie wylicza ich z itemów podrzędnych. | P0 |
 | ITM-5 | Osoba w itemie ma rolę (`właściciel`, `zleceniodawca`, `interesariusz`, `wykonawca`, `informowany`) i pole „oczekiwania". | P0 |
 | ITM-6 | Fakt itemu ma typ (`decyzja`, `wymaganie`, `ryzyko`, `informacja`, `pytanie`), datę zdarzenia, powiązane osoby, źródło i cytat. Faktów się nie edytuje: nieaktualny fakt oznacza się jako nieaktualny i opcjonalnie wskazuje fakt, który go zastąpił. | P0 |
-| ITM-7 | Oś czasu itemu pokazuje chronologicznie fakty, zmiany pól (status, kondycja, termin, właściciel) i powiązane źródła. Dla dowolnej daty da się odczytać, co zmieniło się od tego dnia. | P0 |
-| ITM-8 | Strona itemu zawiera: nagłówek z polami, podsumowanie stanu, osoby i ich oczekiwania, wymagania, decyzje, ryzyka, otwarte pytania, podzadania, oś czasu, źródła (wrzutki, fragmenty notatek, dokumenty) oraz opis w edytorze. | P0 |
+| ITM-7 | Oś czasu itemu pokazuje chronologicznie fakty, zmiany pól (status, kondycja, ważność, data rozpoczęcia, termin, oznaczenie kamienia milowego, właściciel, item nadrzędny) i powiązane źródła. Dla dowolnej daty da się odczytać, co zmieniło się od tego dnia. | P0 |
+| ITM-8 | Strona itemu zawiera: nagłówek z polami i ścieżką itemów nadrzędnych, podsumowanie stanu, osoby i ich oczekiwania, wymagania, decyzje, ryzyka, otwarte pytania, podzadania, oś czasu, źródła (wrzutki, fragmenty notatek, dokumenty) oraz opis w edytorze. Lista podzadań pokazuje itemy bezpośrednio podrzędne (na stronie projektu jego zadania) i pozwala dodać kolejny; każdy z nich ma własną stronę z własnymi podzadaniami. Strona projektu ma ponadto wykres Gantta i kalendarz, a strona zadania wykres Gantta (8.14); wykres pokazuje wszystkie poziomy naraz. | P0 |
 | ITM-9 | Podsumowanie stanu (kilka zdań) jest generowane z faktów i pól. Zawiera odnośniki do źródeł i datę wygenerowania, odświeża się po zmianach i na żądanie. Jest oznaczone jako wygenerowane i nie jest traktowane jako źródło faktów. | P0 |
 | ITM-10 | Itemy można scalać, a fakty i źródła przenosić między itemami. | P0 |
-| ITM-11 | Lista itemów ma filtry: typ, status, moja rola, osoba, kondycja, brak aktywności od N dni. | P0 |
+| ITM-11 | Lista itemów ma filtry: typ, projekt, item nadrzędny, kamienie milowe, status, ważność, moja rola, osoba, kondycja, termin w zakresie dat, brak aktywności od N dni. Filtr projektu obejmuje wszystko, co projekt zawiera, na każdej głębokości, a filtr itemu nadrzędnego tylko itemy bezpośrednio pod nim; podzadanie jest na liście zadaniem, a wiersz każdego zadania, które ma item nadrzędny, pokazuje ścieżkę itemów nadrzędnych. Listę można uporządkować według ważności i według terminu. | P0 |
 | ITM-12 | Synchronizacja tylko do odczytu z zewnętrznym trackerem na podstawie odnośnika zewnętrznego. | P2 |
+| ITM-13 | Ważność: `wysoka`, `normalna`, `niska`. Nowy item ma ważność `normalna`. Ważność ustawia użytkownik; agent może ją zaproponować. | P0 |
 
 ### 8.5 Osoby
 
@@ -235,7 +242,7 @@ Operacje zastosowane od razu są widoczne na karcie w Inboxie jako „zastosowan
 | ID | Wymaganie | Priorytet |
 |---|---|---|
 | CHT-1 | Rozmowa jest dostępna z każdego ekranu. Agent zna otwarty widok (item, osoba, notatka) i traktuje go jako domyślny kontekst. | P0 |
-| CHT-2 | Agent odpowiada na pytania o pojedyncze obiekty i o przekroje (np. „na co czekam od zespołu płatności", „co się zmieniło w Atlasie od poniedziałku") wyłącznie na podstawie danych huba. Odpowiedź zawiera odnośniki do itemów, notatek i źródeł. | P0 |
+| CHT-2 | Agent odpowiada na pytania o pojedyncze obiekty i o przekroje (np. „na co czekam od zespołu płatności", „co się zmieniło w Atlasie od poniedziałku", „co wypada w Atlasie w przyszłym tygodniu") wyłącznie na podstawie danych huba. Odpowiedź zawiera odnośniki do itemów, notatek, źródeł i widoków. | P0 |
 | CHT-3 | Agent wykonuje polecenia zmieniające dane (utwórz, zmień, zamknij, powiąż, scal, dodaj notatkę lub osobę) tymi samymi operacjami co przetwarzanie. Każda trafia do dziennika i jest cofalna. | P0 |
 | CHT-4 | Gdy dane nie zawierają odpowiedzi, agent mówi to wprost. Własne wnioski oddziela od faktów zapisanych w hubie. | P0 |
 | CHT-5 | Odpowiedzi są strumieniowane. Widać, co agent odczytał i co zmienił. | P0 |
@@ -246,8 +253,8 @@ Operacje zastosowane od razu są widoczne na karcie w Inboxie jako „zastosowan
 
 | ID | Wymaganie | Priorytet |
 |---|---|---|
-| VIEW-1 | Widok „Dziś" pokazuje: moje zadania (rola `robię`) z terminem na dziś i zaległe; zadania `czekam` uporządkowane według czasu oczekiwania; projekty zablokowane lub z kondycją żółtą i czerwoną; itemy bez aktywności od N dni (domyślnie 14); liczbę kart w Inboxie; ostatnie notatki. | P0 |
-| VIEW-2 | Listy widoku „Dziś" są wyliczane z danych, bez udziału modelu. | P0 |
+| VIEW-1 | Widok „Dziś" pokazuje: moje zadania (rola `robię`) z terminem na dziś i zaległe, najpierw o wyższej ważności; kamienie milowe z terminem na dziś i zaległe; zadania `czekam` uporządkowane według czasu oczekiwania; projekty zablokowane oraz projekty i zadania z kondycją żółtą lub czerwoną; itemy bez aktywności od N dni (domyślnie 14), z wyjątkiem itemów, których data rozpoczęcia jeszcze nie nadeszła, i kamieni milowych przed terminem; liczbę kart w Inboxie; ostatnie notatki. Termin przybliżony jest oznaczany jako zaległy dopiero po trzech dniach roboczych. | P0 |
+| VIEW-2 | Listy widoku „Dziś", wykres Gantta i kalendarz projektu są wyliczane z danych, bez udziału modelu. | P0 |
 | VIEW-3 | Nawigacja obejmuje: Dziś, Inbox, Projekty i zadania, Osoby, Notatki, Szukaj, Dziennik zmian, Ustawienia. | P0 |
 | VIEW-4 | Wyszukiwanie pełnotekstowe obejmuje itemy, fakty, notatki, wrzutki z transkrypcjami, dokumenty i osoby. Wyszukanie osoby zwraca jej stronę i powiązane materiały niezależnie od formy, w jakiej imię wystąpiło w tekście. | P0 |
 | VIEW-5 | Wyszukiwanie pełnotekstowe jest odporne na polską odmianę także dla zwykłych słów. | P1 |
@@ -285,8 +292,8 @@ Operacje zastosowane od razu są widoczne na karcie w Inboxie jako „zastosowan
 
 | ID | Wymaganie | Priorytet |
 |---|---|---|
-| AUD-1 | Każda operacja agenta jest zapisana w dzienniku: rodzaj, stan przed i po, źródło, czas, sposób zatwierdzenia (polecenie, automatycznie, zaakceptowana propozycja). | P0 |
-| AUD-2 | Każdą operację agenta można cofnąć jednym działaniem. Cofnięcie jest wpisem w dzienniku. | P0 |
+| AUD-1 | Każda operacja agenta i każda ręczna zmiana użytkownika jest zapisana w dzienniku: rodzaj, stan przed i po, źródło, czas, sposób zatwierdzenia (polecenie, automatycznie, zaakceptowana propozycja, ręczna zmiana). | P0 |
+| AUD-2 | Każdą operację agenta można cofnąć jednym działaniem; gdy późniejsze zmiany stoją cofnięciu na drodze, to samo działanie cofa je razem z nią albo aplikacja wskazuje, co trzeba cofnąć najpierw. Cofnięcie jest wpisem w dzienniku. | P0 |
 | AUD-3 | Widok dziennika ma filtry: data, item, osoba, rodzaj operacji, sposób zatwierdzenia. | P0 |
 | AUD-4 | Usunięcie wrzutki, notatki lub dokumentu przez użytkownika jest trwałe i obejmuje pliki. System pyta, co zrobić z faktami pochodnymi: usunąć czy zostawić oznaczone jako „bez źródła". | P0 |
 
@@ -301,6 +308,36 @@ Operacje zastosowane od razu są widoczne na karcie w Inboxie jako „zastosowan
 | CFG-5 | Diagnostyka endpointu sprawdza: wywołania narzędzi, strumieniowanie, wejście obrazowe, `cache_control`, `effort`, `thinking` i wejście PDF. Wynik zapisuje się w profilu. Aplikacja używa tylko potwierdzonych funkcji i działa poprawnie bez opcjonalnych. | P0 |
 | CFG-6 | Identyfikatory modeli ustawia się osobno dla ról: przetwarzanie, rozmowa, synteza. Domyślnie wszystkie role używają jednego modelu. | P0 |
 | CFG-7 | Aplikacja pokazuje zużycie tokenów i szacunkowy koszt na dzień i na rolę. | P1 |
+
+### 8.14 Harmonogram i kalendarz
+
+| ID | Wymaganie | Priorytet |
+|---|---|---|
+| SCH-1 | Item ma datę rozpoczęcia i termin. Każda z tych dat jest dniem i może być pusta. Data jest znana co do dnia, w przybliżeniu („około 15 listopada") albo co do okresu: tygodnia, miesiąca, kwartału, półrocza lub roku („w listopadzie", „w Q1"). Dla okresu zapisany jest jego pierwszy dzień jako data rozpoczęcia albo ostatni jako termin, a widoki pokazują okres zamiast dnia. Data rozpoczęcia może być późniejsza niż termin (praca, która zaczyna się po terminie); widoki i karta propozycji to oznaczają. | P0 |
+| SCH-2 | Zadanie na każdym poziomie hierarchii można oznaczyć jako kamień milowy: punkt w czasie, np. wydanie, decyzja komitetu, podpisanie umowy. Dniem kamienia milowego jest termin, który może być jeszcze nieustalony; daty rozpoczęcia kamień milowy nie ma, a nadanie oznaczenia itemowi z datą rozpoczęcia tę datę usuwa. Osiągnięty kamień milowy ma status `zrobione`. Oznaczenie można nadać istniejącemu zadaniu i zdjąć. Projekt nie jest kamieniem milowym. Oznaczenie jest jawne. Agent dostaje je jako osobne pole każdego itemu w indeksie aktywnych itemów i w wynikach operacji odczytu, a nadaje je i zdejmuje osobnym polem operacji `create_item` i `update_item`; użytkownik widzi je na stronie itemu, na listach, na karcie propozycji, na wykresie Gantta i w kalendarzu. | P0 |
+| SCH-3 | Z materiału agent wyodrębnia elementy harmonogramu: termin, datę rozpoczęcia, okres, kamień milowy i przesunięcie daty. Daty względne, przybliżone i podane jako okres zamienia na dni według reguł opisanych pod tabelą. | P0 |
+| SCH-4 | Zapisanej daty agent nie nadpisuje: inna data w nowym materiale jest propozycją zmiany. Propozycja dotycząca daty pokazuje w jednym wierszu pole, wartość obecną, wartość nową z dniem tygodnia, różnicę w dniach i cytat; pochodzenie obecnej wartości (źródło albo ręczna zmiana, z dniem) i dzień, od którego liczono, pokazuje po rozwinięciu oraz zawsze wtedy, gdy datę wyliczono albo propozycja ma oznaczenie. Propozycja dostaje oznaczenie, gdy materiał jest starszy niż najnowszy fakt itemu albo niż ustalenie, z którego pochodzi obecna wartość, gdy zapisana wartość zmieniła się od chwili powstania propozycji, gdy przesunięcie wygląda na powtórzenie już zastosowanego albo gdy po zmianie data rozpoczęcia byłaby późniejsza niż termin. Oznaczonej propozycji nie obejmuje „zaakceptuj wszystko". Gdy data zdarzenia źródła jest przybliżona, karta z datami liczonymi od niej zaczyna się pytaniem o datę zdarzenia, a po odpowiedzi daty przelicza kod. | P0 |
+| SCH-5 | Projekt i zadanie mają wykres Gantta. Pierwszym wierszem jest sam projekt albo zadanie, a kolejnymi wszystko, co zawiera, na każdej głębokości: wiersze tworzą drzewo, w którym item stoi pod swoim itemem nadrzędnym, a każdą gałąź można zwinąć i rozwinąć. Okres jest paskiem, sam termin albo sama data rozpoczęcia znacznikiem, kamień milowy punktem. Wykres wyróżnia dzień dzisiejszy, status, kondycję, itemy zaległe, daty przybliżone i okresy oraz datę rozpoczęcia późniejszą niż termin; itemy bez dat wymienia pod wykresem, a item bez dat, który zawiera item z datą, zostaje wierszem drzewa bez paska. Z wiersza można otworzyć item. Wykres ma skale tygodni i miesięcy oraz dopasowanie do szerokości. | P0 |
+| SCH-6 | Na wykresie Gantta użytkownik może dodać zadanie lub kamień milowy pod dowolnym wierszem wykresu, czyli także podzadanie na każdym poziomie, oraz ustawić, zmienić i usunąć daty itemu. Każda zmiana jest operacją użytkownika: trafia do dziennika i można ją cofnąć. | P0 |
+| SCH-7 | Projekt ma kalendarz: widok miesiąca z terminami, datami rozpoczęcia i kamieniami milowymi projektu oraz wszystkiego, co projekt zawiera, na każdej głębokości. Daty znane co do miesiąca lub dłuższego okresu są wymienione nad siatką miesiąca, a nie w dniu. Z pozycji kalendarza można otworzyć item. | P0 |
+| SCH-8 | Itemy na wykresie Gantta można przesuwać i rozciągać przeciągnięciem, a pozycje kalendarza przenosić na inny dzień; jedno przeciągnięcie to jedna operacja użytkownika. Przesuwając item, można przesunąć jego itemy podrzędne na każdej głębokości o tę samą liczbę dni: jedną operacją i z jednym cofnięciem. Z dnia kalendarza można dodać zadanie z terminem lub kamień milowy, a z pozycji zmienić daty itemu. | P1 |
+| SCH-9 | Item może czekać na inny item („po wdrożeniu płatności"). Agent proponuje taką zależność na podstawie materiału, użytkownik może ją dodać sam. Wykres Gantta pokazuje zależności i oznacza sprzeczności: następnik zaczyna się przed terminem poprzednika, item kończy się po terminie itemu nadrzędnego. Aplikacja nie przesuwa dat sama. | P1 |
+| SCH-10 | Przegląd projektów: jeden wykres Gantta wszystkich aktywnych projektów z ich okresami, kamieniami milowymi i kondycją. | P1 |
+| SCH-11 | Kalendarz wszystkich projektów: ten sam widok dla wszystkich aktywnych itemów, także tych bez projektu, z filtrem projektu i mojej roli, dostępny z nawigacji. | P1 |
+| SCH-12 | Wykres Gantta pokazuje poślizg terminu itemu: różnicę między terminem a jego pierwszą zapisaną wartością i liczbę zmian, odczytane z dziennika. Dla itemu zamkniętego pokazuje dzień zamknięcia względem terminu. | P2 |
+| SCH-13 | Kalendarz ma widok tygodnia i warstwy historii: fakty, wrzutki i fragmenty notatek w dniach ich zdarzeń. Każdą warstwę można włączyć i wyłączyć. | P2 |
+| SCH-14 | Wykres Gantta można skopiować jako obraz i jako tekst (tabela Markdown) oraz wydrukować; miesiąc kalendarza można skopiować jako obraz i wydrukować. | P2 |
+
+**Reguły dat (SCH-3)**
+
+1. Punkt odniesienia określa CAP-7. Przesunięcie („o dwa tygodnie", „tydzień później", „o miesiąc") liczy się od daty zapisanej w itemie; przesunięcie o miesiące oraz przesunięcie daty znanej co do okresu dają datę przybliżoną. Gdy item nie ma daty, której dotyczy przesunięcie, agent nie proponuje daty: zapisuje w tym itemie fakt typu `ryzyko` z cytatem.
+2. Tydzień pracy trwa od poniedziałku do piątku. „Koniec tygodnia" to piątek, a „przyszły tydzień" to tydzień następujący po tygodniu dnia odniesienia. Koniec miesiąca, kwartału, półrocza i roku to ich ostatni dzień; kwartały i półrocza liczy się według roku kalendarzowego.
+3. Wyrażenie, które wskazuje dzień, daje datę dokładną: data („20 listopada"), dzień tygodnia („w piątek"), liczba dni („za 3 dni"), koniec nazwanego okresu („do końca miesiąca"). Dzień tygodnia oznacza najbliższy taki dzień po dniu odniesienia, a z określeniem „przyszły" ten dzień w przyszłym tygodniu; karta pokazuje wtedy także najbliższy taki dzień jako drugą możliwość. Data bez roku oznacza najbliższą taką datę nie wcześniejszą niż dzień odniesienia.
+4. Wyrażenie, które nazywa okres („w przyszłym tygodniu", „w listopadzie", „w Q1", „w pierwszym półroczu", „w 2027"), daje datę z dokładnością do tego okresu: termin i kamień milowy przypadają na jego ostatni dzień, data rozpoczęcia na pierwszy. Praca umieszczona w okresie („testy w przyszłym tygodniu") dostaje datę rozpoczęcia i termin z jego granic. Okres bez roku to najbliższy taki okres, który nie skończył się przed dniem odniesienia.
+5. Wyrażenie, które wskazuje moment w przybliżeniu, daje datę przybliżoną: „połowa listopada" to 15. dzień miesiąca, „za dwa tygodnie" to dzień odniesienia przesunięty o 14 dni. Czas trwania („potrwa dwa tygodnie") liczy się od daty rozpoczęcia łącznie z nią i daje termin przybliżony; gdy tak wyliczony termin wypadłby w sobotę lub niedzielę, przypada na poprzedzający piątek. Innych dat nie przesuwa się z soboty ani niedzieli.
+6. Data wyliczona względem przybliżonej daty zdarzenia („w piątek", „za 3 dni", „w przyszłym tygodniu") jest przybliżona, także wtedy, gdy wyrażenie nazywa okres: zapisany jest dzień z reguły 4 jako data przybliżona. Nie dotyczy to daty podanej dniem i miesiącem.
+7. Daty nie daje wyrażenie bez dnia i bez okresu („wkrótce", „jak najszybciej", „po świętach") ani zależność od innej pracy („po wdrożeniu płatności", „tydzień po komitecie"). Zależność agent zapisuje jako fakt itemu, który czeka, a gdy takiego itemu nie ma, proponuje go bez dat; powiązanie między itemami wprowadza dopiero SCH-9.
+8. Gdy materiał podaje dla tej samej daty itemu różne dni, agent proponuje tylko dzień uzgodniony w rozmowie. Gdy rozmowa tego nie rozstrzyga, nie proponuje daty i zapisuje fakt typu `pytanie` z oboma dniami.
 
 ## 9. Kluczowe scenariusze i kryteria akceptacji
 
@@ -340,6 +377,24 @@ Użytkownik pyta: „Co mam omówić z Anią w czwartek?"
 3. Odpowiedź nie zawiera informacji, których nie ma w hubie. Gdy czegoś brakuje, agent to stwierdza.
 4. Pytanie nie zmienia żadnych danych.
 
+### 9.4 Wątek z terminami i przesunięciem
+
+Stan dodatkowy: w „Atlasie" są zadania „Testy wydajnościowe" (w toku, termin 9 października 2026) i „Migracja danych" (bez dat) oraz kamień milowy „Release 2.0" (termin 17 listopada 2026).
+
+Użytkownik wkleja treść wątku i wysyła ją bez komentarza:
+
+> czwartek, 8 października 2026
+> Piotr Nowak: Atlas: testy wydajnościowe potrwają do końca przyszłego tygodnia, wcześniej nie zdążymy.
+> Anna Kowalska: To przesuwamy release 2.0 o dwa tygodnie. Code freeze robimy 20 listopada.
+> Piotr Nowak: Migracja danych w Atlasie ruszy dopiero po wdrożeniu płatności.
+
+1. Data zdarzenia wrzutki to 8 października 2026 i nie jest oznaczona jako przybliżona.
+2. Karta w Inboxie zawiera trzy propozycje do decyzji: termin „Testów wydajnościowych" z 9 na 16 października 2026; termin „Release 2.0" z 17 listopada na 1 grudnia 2026, liczony od zapisanego terminu; nowy kamień milowy „Code freeze" w „Atlasie" z terminem 20 listopada 2026. Żadna z tych dat nie jest oznaczona jako przybliżona.
+3. Każda propozycja pokazuje cytat, a obie zmiany terminu, jako daty wyliczone, także wartość obecną z jej pochodzeniem, różnicę w dniach i dzień, od którego liczono.
+4. Zdanie o migracji danych nie daje żadnej daty: jest faktem dodanym do „Migracji danych" automatycznie, z cytatem.
+5. Po akceptacji wykres Gantta „Atlasu" pokazuje znacznik terminu „Testów wydajnościowych" 16 października oraz punkty „Code freeze" 20 listopada i „Release 2.0" 1 grudnia, a „Migrację danych" wymienia pod wykresem wśród itemów bez dat, z cytatem o wdrożeniu płatności. Oś czasu „Release 2.0" pokazuje zmianę terminu z odnośnikiem do wrzutki.
+6. Użytkownik dodaje na wykresie kamień milowy „Demo dla zarządu" na 3 grudnia 2026. Kamień milowy jest widoczny na wykresie i w kalendarzu grudnia, a dziennik zawiera operację użytkownika. Jej cofnięcie usuwa go z obu widoków.
+
 ## 10. Wymagania niefunkcjonalne
 
 | ID | Obszar | Wymaganie |
@@ -375,7 +430,7 @@ Użytkownik pyta: „Co mam omówić z Anią w czwartek?"
 - SQLite (jeden plik) i katalog plików w obrębie workspace'u.
 - Wyszukiwanie pełnotekstowe w SQLite; bez bazy wektorowej w M1–M2.
 - Tekst z dokumentów jest wyodrębniany lokalnie, bez zależności od obsługi PDF po stronie modelu.
-- Przy skali z NFR-6 agent dostaje zwarty indeks wszystkich aktywnych itemów i osób; starsze i zamknięte obiekty znajduje narzędziem wyszukiwania.
+- Przy skali z NFR-6 agent dostaje zwarty indeks wszystkich aktywnych itemów i osób; starsze i zamknięte obiekty znajduje narzędziem wyszukiwania. Indeks podaje dla każdego itemu typ, item nadrzędny i oznaczenie kamienia milowego jako osobne pola. Zawiera także zamknięte itemy nadrzędne aktywnych itemów.
 
 ### 11.3 Aplikacja
 
@@ -390,11 +445,12 @@ Cele są wstępne i wymagają kalibracji po pierwszych tygodniach używania M1.
 |---|---|---|
 | Dni robocze z co najmniej jedną wrzutką | ≥ 4 z 5 w tygodniu, od trzeciego tygodnia | dane huba |
 | Propozycje powiązań zaakceptowane bez zmian | ≥ 90% | Inbox |
+| Propozycje dat zaakceptowane bez zmiany daty | ≥ 90% | Inbox |
 | Operacje automatyczne cofnięte przez użytkownika | ≤ 3% | dziennik zmian |
 | Duplikaty itemów i osób wykryte po fakcie | ≤ 1 tygodniowo | scalenia w dzienniku |
 | Czas rozstrzygnięcia karty w Inboxie | mediana ≤ 20 s | Inbox |
 | Zaległość Inboxu | brak kart starszych niż 1 dzień roboczy | Inbox |
-| Aktywne itemy z aktywnością w ostatnich 14 dniach | ≥ 80% | dane huba |
+| Aktywne itemy z aktywnością w ostatnich 14 dniach, bez itemów, których data rozpoczęcia jeszcze nie nadeszła, i kamieni milowych przed terminem | ≥ 80% | dane huba |
 | Przygotowanie do 1:1 lub statusu | ≤ 5 min | ocena użytkownika |
 
 **Kryterium zatrzymania.** Jeśli przez dwa kolejne tygodnie po M1 jest mniej niż 3 aktywne dni w tygodniu, prace nad M2 wstrzymuje się do przeglądu założeń.
@@ -404,15 +460,15 @@ Cele są wstępne i wymagają kalibracji po pierwszych tygodniach używania M1.
 | Etap | Zakres | Kryterium zakończenia |
 |---|---|---|
 | **M0 — walidacja** (zalecana, bez interfejsu) | Katalog plików Markdown obsługiwany przez Claude Code według spisanych reguł; dwa tygodnie codziennego użycia. | Lista pytań z rozdziału 5 potwierdzona lub poprawiona; korpus 30–50 prawdziwych wrzutek do rzeczywistego zestawu regresyjnego; decyzja, czy nawyk się utrzymuje. |
-| **M1 — MVP** | Wszystkie wymagania P0. | Scenariusze 9.1–9.3 spełnione na zestawie syntetycznym; diagnostyka potwierdza funkcje rdzenia na obu endpointach; tydzień codziennego użycia w workspace służbowym bez utraty danych. |
+| **M1 — MVP** | Wszystkie wymagania P0. | Scenariusze 9.1–9.4 spełnione na zestawie syntetycznym; diagnostyka potwierdza funkcje rdzenia na obu endpointach; tydzień codziennego użycia w workspace służbowym bez utraty danych. |
 | **M2 — proaktywność i wiedza** | Wymagania P1. | Metryki z rozdziału 12 osiągają cele przez dwa kolejne tygodnie. |
 | **M3 — integracje** | Wymagania P2, w tym odczyt z trackera. | Do określenia po M2. |
 
-M1 obejmuje 78 wymagań P0, dlatego jest dostarczany w trzech przyrostach. Każdy jest używalny samodzielnie i kończy się tygodniem codziennego użycia.
+M1 obejmuje 86 wymagań P0, dlatego jest dostarczany w trzech przyrostach. Każdy jest używalny samodzielnie i kończy się tygodniem codziennego użycia.
 
 | Przyrost | Zakres | Co daje użytkownikowi |
 |---|---|---|
-| **M1a — rdzeń pętli** | Workspace i diagnostyka (8.13); wprowadzanie materiału (8.1); przetwarzanie (8.2); Inbox (8.3); projekty i zadania (8.4); podstawowy katalog osób (PER-4, PER-5); dziennik zmian (8.12); edytor dla opisu itemu (EDT-1 do EDT-4). | Wrzucam materiał, akceptuję propozycje, widzę projekty i zadania z osią czasu i źródłami. |
+| **M1a — rdzeń pętli** | Workspace i diagnostyka (8.13); wprowadzanie materiału (8.1); przetwarzanie (8.2); Inbox (8.3); projekty i zadania (8.4); daty i kamienie milowe itemów, ich wyodrębnianie, wykres Gantta ze zmianami ręcznymi i kalendarz projektu (SCH-1 do SCH-7); podstawowy katalog osób (PER-4, PER-5); dziennik zmian (8.12); edytor dla opisu itemu (EDT-1 do EDT-4). | Wrzucam materiał, akceptuję propozycje, widzę projekty i zadania z osią czasu i źródłami oraz na wykresie Gantta, dodaję i zmieniam daty na wykresie i widzę projekt w kalendarzu. |
 | **M1b — osoby i notatki** | Pozostałe wymagania P0 z rozdziału 8.5; notatki (8.6). | Mam historię rozmów z każdą osobą, a notatki ze spotkań łączą się z projektami, których dotyczyły. |
 | **M1c — rozmowa i przegląd** | Rozmowa z agentem (8.7); widok „Dziś" i wyszukiwanie (8.8); dokumenty (8.9). | Pytam o dowolny projekt lub osobę i zaczynam dzień od listy tego, co wymaga uwagi. |
 
@@ -430,29 +486,33 @@ M1 obejmuje 78 wymagań P0, dlatego jest dostarczany w trzech przyrostach. Każd
 | Edycja notatki unieważnia wyprowadzone fakty | Fakty bez pokrycia w źródle | Oznaczenie „źródło zmienione" (NOT-10); ponowna analiza (ING-11) |
 | Zakres przerasta czas właściciela | Niedokończone narzędzie | Priorytety P0–P2; M1 dostarczany w trzech samodzielnie używalnych przyrostach (rozdział 13) |
 | Czas przetwarzania i koszt modelu | Wolne karty, niechęć do wrzucania | Przetwarzanie w tle (CAP-2); pomiar zużycia (CFG-7) |
+| Błędnie policzona data: względna, przybliżona albo przesunięcie | Fałszywe alarmy o zaległych terminach, utrata zaufania do harmonogramu | Daty rozpoczęcia i terminy z wniosków agenta zawsze przez Inbox (ING-7); propozycja pokazuje, od czego liczono (SCH-4); daty przybliżone i okresy są oznaczone (SCH-1); przypadki dat w zestawie regresyjnym (NFR-11) |
+| Harmonogram rozrasta się w narzędzie do zarządzania projektem | Zakres przerasta czas właściciela; dublowanie trackera | Nie-cele (rozdział 3); aplikacja nie przesuwa dat sama (SCH-9) |
 
 ## 15. Otwarte pytania
 
 1. Jaki jest wynik diagnostyki routera dla funkcji opcjonalnych: `cache_control`, `effort`, `thinking`, wejście PDF?
 2. Jak router wydaje poświadczenia: stały token czy polecenie pomocnicze z rotacją?
-3. Czy słowniki statusów, ról i typów faktów z rozdziału 8.4 odpowiadają sposobowi pracy użytkownika?
+3. Czy słowniki statusów, ważności, ról i typów faktów z rozdziału 8.4 odpowiadają sposobowi pracy użytkownika?
 4. Jakie progi przyjąć dla braku aktywności (domyślnie 14 dni) i dla czasu oczekiwania w zadaniach `czekam`?
 5. Czy interfejs ma być po polsku, jak zakłada NFR-9?
 6. Czy oznaczanie poufności notatek (NOT-14) jest potrzebne wcześniej niż w M3?
 7. Czy M0 będzie realizowane przed M1, czy równolegle?
 8. Który tracker i jaki zakres odczytu w M3?
+9. Czy reguły dat z rozdziału 8.14 (tydzień pracy od poniedziałku do piątku, „przyszły czwartek" jako czwartek następnego tygodnia, połowa miesiąca jako 15. dzień, czas trwania w tygodniach jako termin przybliżony, kwartały i półrocza według roku kalendarzowego, termin przybliżony zaległy po trzech dniach roboczych) odpowiadają temu, jak pisze i pracuje zespół?
 
 ## Załącznik A. Katalog operacji agenta (M1)
 
-Operacje odczytu: `search`, `get_item`, `get_person`, `get_note`, `list_items`, `read_source`, `read_document`.
+Operacje odczytu: `search`, `get_item`, `get_person`, `get_note`, `list_items`, `read_source`, `read_document`. Każdy item w ich wynikach ma osobne pola: typ, item nadrzędny i oznaczenie kamienia milowego.
 
 Operacje zapisu:
 
 | Operacja | Skutek |
 |---|---|
-| `create_item` | Nowy projekt, zadanie lub podzadanie. |
-| `update_item` | Zmiana pól: status, kondycja, termin, właściciel, moja rola, tytuł, aliasy. |
+| `create_item` | Nowy projekt albo zadanie; zadanie samodzielne, w projekcie albo, jako podzadanie, pod innym zadaniem na dowolnym poziomie. Opcjonalnie z datą rozpoczęcia i terminem; zadanie także jako kamień milowy, co operacja podaje osobnym polem. |
+| `update_item` | Zmiana pól: status, kondycja, ważność, data rozpoczęcia, termin, oznaczenie kamienia milowego, właściciel, item nadrzędny, moja rola, tytuł, aliasy. Datę podaje się jako dzień z dokładnością albo jako przesunięcie zapisanej daty; granice okresów i przesunięcia liczy kod. |
 | `link_source` | Powiązanie wrzutki, fragmentu lub dokumentu z itemem. |
+| `set_capture_date` | Data zdarzenia wrzutki i oznaczenie, że jest przybliżona (CAP-7): z materiału albo z odpowiedzi użytkownika na pytanie karty (SCH-4). |
 | `add_fact` | Fakt w itemie, ze źródłem i cytatem. |
 | `supersede_fact` | Oznaczenie faktu jako nieaktualnego, opcjonalnie ze wskazaniem następcy. |
 | `set_item_person` | Rola osoby w itemie i jej oczekiwania. |

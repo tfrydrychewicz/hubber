@@ -153,21 +153,38 @@ describe("preflight", () => {
 
 describe("package scripts", () => {
   // In the script itself and not in a "pre" script: npm skips those when ignore-scripts is set.
-  it.each(["dev", "build", "start", "test", "test:watch", "check", "diagnose", "workspace:create"])(
-    "%s runs the preflight before anything else",
-    (name) => {
-      expect(manifest.scripts[name]).toMatch(/^node scripts\/preflight\.cjs && /);
-    },
-  );
+  it.each([
+    "dev",
+    "build",
+    "start",
+    "test",
+    "test:watch",
+    "check",
+    "diagnose",
+    "workspace:create",
+    "synthetic",
+    "perf",
+    "db:fixture",
+  ])("%s runs the preflight before anything else", (name) => {
+    expect(manifest.scripts[name]).toMatch(/^node scripts\/preflight\.cjs && /);
+  });
 
   // exec puts the command in the place of the shell that npm started, so the signals npm passes
   // on reach it. Behind a shell that waits for it, a stopped "npm run" leaves the command running.
-  it.each(["dev", "build", "start", "test", "test:watch", "diagnose", "workspace:create"])(
-    "%s hands over to its last command with exec",
-    (name) => {
-      expect(manifest.scripts[name]).toMatch(/ && exec [^&;|]+$/);
-    },
-  );
+  it.each([
+    "dev",
+    "build",
+    "start",
+    "test",
+    "test:watch",
+    "diagnose",
+    "workspace:create",
+    "synthetic",
+    "perf",
+    "db:fixture",
+  ])("%s hands over to its last command with exec", (name) => {
+    expect(manifest.scripts[name]).toMatch(/ && exec [^&;|]+$/);
+  });
 
   // The gate. "biome check" exits with 0 when all it has found are warnings, so a rule that
   // reports as a warning would leave the gate green without this option.
@@ -222,6 +239,12 @@ describe("package versions", () => {
   // arrives by a deliberate change and not with the next install.
   it("better-sqlite3 is pinned to an exact version", () => {
     expect(manifest.dependencies["better-sqlite3"]).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  // The package writes the SQL of the application's queries, and what SQLite makes of a query
+  // depends on how it is written. So a newer one arrives by a deliberate change as well.
+  it("drizzle-orm is pinned to an exact version", () => {
+    expect(manifest.dependencies["drizzle-orm"]).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   // The package ships its binaries ready-made. Left to itself, npm still runs "node-gyp rebuild"

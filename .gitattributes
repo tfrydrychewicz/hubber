@@ -1,0 +1,6 @@
+# The migration files are checked out byte for byte, whatever a machine is told about line ends.
+# Their sha256 is in manifest.json and in every database that has run them: a checkout that
+# rewrote the line ends would make each start refuse the migrations of its own code.
+src/server/db/migrations/*.sql -text
+# The fixtures are databases, compressed: never text, never rewritten by a checkout.
+src/server/db/fixtures/*.gz binary

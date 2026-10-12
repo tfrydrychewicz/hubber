@@ -14,7 +14,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  MIGRATIONS_DIR,
+  MIGRATIONS_TABLE,
+  MigrationError,
+  MigrationFilesError,
+  pendingMigrations,
+  readMigrations,
+  schemaFingerprint,
+} from "../db/migrate.ts";
 import { type LlmProfile, parseWorkspaceConfig, serializeWorkspaceConfig } from "./config.ts";
 import { type CreateWorkspaceDeps, createWorkspace } from "./create.ts";
 import {
@@ -25,6 +34,21 @@ import {
   type WorkspacePin,
 } from "./database.ts";
 import { WorkspaceError } from "./errors.ts";
+
+// The migrations of this code always go through on a database that was just created, so a
+// failure is made here: with an error set, the runner throws it in place of doing its work.
+// Everything else is the real runner.
+const runner = vi.hoisted(() => ({ failure: undefined as Error | undefined }));
+vi.mock("../db/migrate.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../db/migrate.ts")>();
+  return {
+    ...real,
+    migrateDatabase: (...args: Parameters<typeof real.migrateDatabase>) => {
+      if (runner.failure !== undefined) throw runner.failure;
+      return real.migrateDatabase(...args);
+    },
+  };
+});
 
 const NOW = "2026-10-10T20:15:00.000Z";
 const LAYOUT = ["files", "hubber.sqlite", "workspace.json"];
@@ -52,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  runner.failure = undefined;
   process.umask(startUmask);
   process.chdir(startDir);
   rmSync(work, { recursive: true, force: true });
@@ -107,6 +132,28 @@ describe("createWorkspace", () => {
     ]).toEqual(["700", "700", "600", "600"]);
     // Nothing of the staging directory is left beside it.
     expect(readdirSync(work)).toEqual(["ws"]);
+  });
+
+  it("gives the database the schema of this code, so that the first open has nothing to migrate", () => {
+    const dir = join(work, "ws");
+    const migrations = readMigrations();
+
+    create(dir);
+
+    const db = openWorkspaceDatabase(join(dir, "hubber.sqlite"), ROUTER_PROFILE.endpoint);
+    try {
+      expect(pendingMigrations(db)).toEqual([]);
+      expect(schemaFingerprint(db)).toBe(migrations.at(-1)?.schema);
+      // Recorded as applied at creation, with no copy from before them: there was nothing to copy.
+      expect(db.prepare(`SELECT tag, snapshot FROM ${MIGRATIONS_TABLE} ORDER BY idx`).all()).toEqual(
+        migrations.map(({ tag }) => ({ tag, snapshot: null })),
+      );
+      expect(db.pragma("foreign_key_check")).toEqual([]);
+    } finally {
+      db.close();
+    }
+    // Still the three entries: no directory for copies, and nothing left beside the database.
+    expect(readdirSync(dir).sort()).toEqual(LAYOUT);
   });
 
   it("keeps everything private even when the shell would let others read new files", () => {
@@ -297,6 +344,141 @@ describe("createWorkspace", () => {
 
     expect(error.message).toBe(
       `Nie udało się utworzyć workspace'u w katalogu "${dir}": dysk nie obsługuje trybu WAL bazy SQLite. Utwórz workspace na dysku lokalnym`,
+    );
+    expect(readdirSync(work)).toEqual([]);
+  });
+
+  const FULL_DISK = ", bo na dysku zabrakło miejsca. Zwolnij miejsce albo wskaż inny katalog opcją --dir";
+
+  it.each<[string, MigrationError, string]>([
+    [
+      "a statement of a migration failed",
+      new MigrationError("statement-failed", { tag: "0001_first", statement: 7, code: "SQLITE_ERROR" }),
+      "(migracja 0001_first: SQLITE_ERROR)",
+    ],
+    [
+      "a migration left another schema than the one recorded for it",
+      new MigrationError("schema-drift", { tag: "0002_next", whileMigrating: true }),
+      "(migracja 0002_next: schema-drift)",
+    ],
+    [
+      "a statement of a migration found the disk full",
+      new MigrationError("statement-failed", { tag: "0001_first", statement: 7, code: "SQLITE_FULL" }),
+      `(migracja 0001_first: SQLITE_FULL)${FULL_DISK}`,
+    ],
+  ])(
+    "says in the user's words that the schema could not be set up when %s, and leaves nothing",
+    (_what, problem, words) => {
+      const dir = join(work, "made", "ws");
+      runner.failure = problem;
+
+      const error = failure(() => create(dir));
+
+      expect(error.message).toBe(
+        `Nie udało się utworzyć workspace'u w katalogu "${dir}": nie udało się założyć schematu bazy ${words}`,
+      );
+      expect(error.exitCode).toBe(1);
+      // Neither the staging directory with the database that was begun, nor the directory made on the way.
+      expect(readdirSync(work)).toEqual([]);
+    },
+  );
+
+  // What a disk without room gives, by how little room it has: SQLite's own error at the commit of
+  // the schema, or the error of the database file, which names its place in the staging directory.
+  it.each<[string, (file: string) => Error, string]>([
+    [
+      "the commit of the schema finds the disk full",
+      () => Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" }),
+      `(SQLITE_FULL)${FULL_DISK}`,
+    ],
+    [
+      "the database cannot be opened on a full disk",
+      (file) => new WorkspaceDatabaseError("sqlite", file, { sqliteCode: "SQLITE_FULL" }),
+      `(SQLITE_FULL)${FULL_DISK}`,
+    ],
+    [
+      "SQLite reports anything else of the file",
+      (file) => new WorkspaceDatabaseError("sqlite", file, { sqliteCode: "SQLITE_IOERR_SHMSIZE" }),
+      "(SQLITE_IOERR_SHMSIZE)",
+    ],
+  ])(
+    "says in the user's words that the database could not be set up when %s, and leaves nothing",
+    (_what, problem, words) => {
+      const dir = join(work, "made", "ws");
+      const failing = (file: string) => {
+        writeFileSync(file, "half a database");
+        throw problem(file);
+      };
+
+      const error = failure(() => create(dir, { createDatabase: failing }));
+
+      // With the code, and with neither SQLite's own sentence nor the place of the file that was being made.
+      expect(error.message).toBe(
+        `Nie udało się utworzyć workspace'u w katalogu "${dir}": nie udało się założyć bazy ${words}`,
+      );
+      expect(error.exitCode).toBe(1);
+      expect(readdirSync(work)).toEqual([]);
+    },
+  );
+
+  it("words an error of SQLite that the runner passes on like any other of the database", () => {
+    const dir = join(work, "made", "ws");
+    // Not a statement that failed: the commit of everything that was pending.
+    runner.failure = Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+
+    const error = failure(() => create(dir));
+
+    expect(error.message).toBe(
+      `Nie udało się utworzyć workspace'u w katalogu "${dir}": nie udało się założyć bazy (SQLITE_FULL)${FULL_DISK}`,
+    );
+    expect(readdirSync(work)).toEqual([]);
+  });
+
+  it("says in the user's words that the migrations of the code cannot be used, and leaves nothing", () => {
+    const dir = join(work, "made", "ws");
+    const file = join(MIGRATIONS_DIR, "0001_init.sql");
+    runner.failure = new MigrationFilesError(MIGRATIONS_DIR, "Migration 0001_init differs from its entry.", {
+      changedFile: file,
+    });
+
+    const error = failure(() => create(dir));
+
+    // Nothing is said of a database: there is none yet, and none is left.
+    expect(error.message).toBe(
+      `Nie udało się utworzyć workspace'u w katalogu "${dir}": plik migracji "${file}" ma inną treść niż ta, którą zapisano dla niego w pliku manifest.json. To błąd kopii kodu aplikacji, a nie workspace'u: przywróć ten plik z repozytorium. Jego treść zmienia także narzędzie, które przepisuje końce wierszy. Gdy to nowa migracja, nad którą pracujesz, wklej do manifest.json wpis, który wypisuje test src/server/db/migrations.test.ts.`,
+    );
+    expect(error.exitCode).toBe(1);
+    expect(readdirSync(work)).toEqual([]);
+  });
+
+  it("says so in Polish to the end when a file of the migrations is missing, as after half of an update of the code", () => {
+    const dir = join(work, "made", "ws");
+    const file = join(MIGRATIONS_DIR, "0002_next.sql");
+    runner.failure = new MigrationFilesError(MIGRATIONS_DIR, `ENOENT: no such file or directory, open '${file}'`, {
+      missingFile: file,
+    });
+
+    const error = failure(() => create(dir));
+
+    expect(error.message).toBe(
+      `Nie udało się utworzyć workspace'u w katalogu "${dir}": w katalogu migracji tej wersji aplikacji brakuje pliku "${file}". To błąd kopii kodu aplikacji, a nie workspace'u: przywróć ten plik z repozytorium albo dokończ przerwaną aktualizację kodu.`,
+    );
+    expect(readdirSync(work)).toEqual([]);
+  });
+
+  it("says so in Polish to the end when the manifest of the migrations is empty or cut short", () => {
+    const dir = join(work, "made", "ws");
+    const file = join(MIGRATIONS_DIR, "manifest.json");
+    runner.failure = new MigrationFilesError(
+      MIGRATIONS_DIR,
+      "manifest.json cannot be read as JSON: Unexpected end of JSON input",
+      { damagedManifest: file },
+    );
+
+    const error = failure(() => create(dir));
+
+    expect(error.message).toBe(
+      `Nie udało się utworzyć workspace'u w katalogu "${dir}": plik "${file}" w katalogu migracji tej wersji aplikacji jest niepełny albo uszkodzony. To błąd kopii kodu aplikacji, a nie workspace'u: przywróć ten plik z repozytorium albo dokończ przerwaną aktualizację kodu.`,
     );
     expect(readdirSync(work)).toEqual([]);
   });

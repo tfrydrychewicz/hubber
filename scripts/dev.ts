@@ -11,10 +11,17 @@ import { busyPortMessage, isBusyPortMessage } from "../src/server/busy-port.ts";
 import { EXIT_FAILURE, EXIT_USAGE } from "../src/server/exit-codes.ts";
 import { withoutSdkVariables } from "../src/server/llm/credentials/scrub-env.ts";
 import { DEFAULT_API_PORT, DEFAULT_WEB_PORT, HOST, PortError, parsePort } from "../src/server/ports.ts";
-import { isWorkspaceRefusal } from "../src/server/workspace/errors.ts";
+import { isMigrationDone, isMigrationNotice, isWorkspaceRefusal } from "../src/server/workspace/errors.ts";
 import { locateWorkspace, WorkspaceLocationError } from "../src/server/workspace/location.ts";
 
 const GRACE_MS = 5000;
+// One Ctrl-C arrives more than once: from the terminal and, a moment later, from npm, and again
+// and again for as long as the key is held down. A signal that follows another one, or the
+// beginning of a stop, within this time is taken for a part of the same request; only one that
+// comes after this much silence is somebody asking again. It is a guess by the clock: a second
+// Ctrl-C pressed sooner than this is not heard and has to be pressed once more, and a signal
+// that npm passes on later than this, or a key that repeats more slowly, counts as a new request.
+const ECHO_MS = 500;
 const READY_TIMEOUT_MS = 15_000;
 const ROOT = join(import.meta.dirname, "..");
 
@@ -22,6 +29,17 @@ const ROOT = join(import.meta.dirname, "..");
 const groups = new Set<number>();
 const closed: Promise<void>[] = [];
 let stopping = false;
+// A start that has to bring the database of the workspace up to date says so before the work and
+// after it. In between the server answers nobody and acts on no signal, for as long as the
+// migration takes; at the scale of three years of data that can be more than the time a start, or
+// a stop, is given. For the runner it ends with the second line, with a refusal, which ends the
+// session, or with the watcher's line about a server that ended by itself: see onApiLine().
+let apiMigrating = false;
+// While a stop is under way: when it began, and how to give the servers the grace period anew
+// and how to end it at once.
+let stopUnderWay: { since: number; graceAnew: () => void; force: (why: string) => void } | undefined;
+// When the last of the signals that end the session arrived; 0 before the first.
+let lastStopSignal = 0;
 
 const useColor = process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
 const paint = (code: number, text: string) => (useColor ? `\u001b[${code}m${text}\u001b[0m` : text);
@@ -40,10 +58,16 @@ function isPortFree(port: number): Promise<boolean> {
   });
 }
 
-async function waitUntil(ready: () => boolean): Promise<boolean> {
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline && !stopping) {
+/**
+ * Gives a server the time to come up. While it is "on hold" the time does not count, and the
+ * whole of it is there again once the hold is over: a server on hold is at work, not hanging.
+ */
+async function waitUntil(ready: () => boolean, onHold: () => boolean = () => false): Promise<boolean> {
+  let deadline = Date.now() + READY_TIMEOUT_MS;
+  while (!stopping) {
     if (ready()) return true;
+    if (onHold()) deadline = Date.now() + READY_TIMEOUT_MS;
+    else if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
@@ -148,21 +172,56 @@ function signalGroups(signal: NodeJS.Signals): void {
 }
 
 async function stop(exitCode: number): Promise<void> {
-  // One Ctrl-C arrives twice, from the terminal and from npm, so a repeat must be harmless.
+  // Asked for by a signal, by a server that gave up and by a child that ended: once is enough.
   if (stopping) return;
   stopping = true;
   signalGroups("SIGTERM");
   // What had to be killed did not shut down, so the stop has failed whatever asked for it.
   // The server treats its own shutdown deadline the same way.
   let forced = false;
-  const timer = setTimeout(() => {
+  const force = (why: string): void => {
+    if (forced) return;
     forced = true;
-    say(`Procesy nie zakończyły się w ciągu ${GRACE_MS / 1000} s. Wymuszam zamknięcie.`);
+    say(`${why} Wymuszam zamknięcie.`);
     signalGroups("SIGKILL");
-  }, GRACE_MS);
+  };
+  let timer: NodeJS.Timeout | undefined;
+  const graceAnew = (): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      // A server in the middle of a migration is not killed for being slow to stop: it acts on the
+      // signal once the migration is done, as its own notice says. The grace period begins anew
+      // then (see onApiLine), so what is killed in the end is a server that hangs afterwards.
+      if (!apiMigrating) force(`Procesy nie zakończyły się w ciągu ${GRACE_MS / 1000} s.`);
+    }, GRACE_MS);
+  };
+  graceAnew();
+  stopUnderWay = { since: Date.now(), graceAnew, force };
+  if (apiMigrating) {
+    say(
+      "Serwer API aktualizuje bazę workspace'u; czekam, aż skończy. Ponowne Ctrl-C zatrzyma go od razu, a przerwana aktualizacja nie zmienia bazy.",
+    );
+  }
   await Promise.all(closed);
   clearTimeout(timer);
   process.exit(forced ? EXIT_FAILURE : exitCode);
+}
+
+/**
+ * For the signals that end the session. The first one stops it in order. One that comes while a
+ * stop is under way, and is a request of its own (see ECHO_MS), ends the wait: the way out of a
+ * stop that waits for a migration, which can take long, or hang. The same holds for a stop that
+ * began by itself, when one of the servers was gone: a Ctrl-C during it asks for its end, and
+ * where it waits for a migration, the line about the wait has said that Ctrl-C does that.
+ */
+function onStopSignal(): void {
+  const now = Date.now();
+  const quietFor = now - lastStopSignal;
+  lastStopSignal = now;
+  if (stopUnderWay === undefined) void stop(0);
+  else if (quietFor >= ECHO_MS && now - stopUnderWay.since >= ECHO_MS) {
+    stopUnderWay.force("Ponowne żądanie zatrzymania.");
+  }
 }
 
 // Once the terminal is closed every write to it fails. Without these handlers the first
@@ -202,7 +261,7 @@ if (busy.length > 0) fail(busy.join("\n"), EXIT_FAILURE);
 
 // SIGQUIT is what Ctrl-\ sends. Left to Node it ends this script at once, and the servers, which
 // are in process groups of their own, would stay behind with the ports and the workspace.
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, () => void stop(0));
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, onStopSignal);
 // Covers exits that bypass stop(), such as an uncaught exception.
 process.on("exit", () => signalGroups("SIGKILL"));
 
@@ -214,9 +273,22 @@ const viteCli = join(dirname(createRequire(import.meta.url).resolve("vite/packag
 // to whoever took it after the check above, while "node --watch" stays alive beside a server
 // that has given up.
 const apiReadyLine = `API nasłuchuje pod adresem http://${HOST}:${apiPort}.`;
+// What "node --watch" prints when the script it runs has ended by itself with anything but code 0,
+// a kill included. The server is the watcher's child and not this script's, so this line is the
+// one sign that a server is gone which said nothing more: its migration went with it. The
+// watcher's line for an end with code 0 is not needed: a server that ends so during an update has
+// said first that the database is up to date. Only where a line begins with the words: a line of
+// the server may hold them behind other text.
+const SERVER_ENDED = /^Failed running /;
 let apiUp = false;
 function onApiLine(line: string): void {
   if (line.includes(apiReadyLine)) apiUp = true;
+  if (isMigrationNotice(line)) apiMigrating = true;
+  if (apiMigrating && (isMigrationDone(line) || isWorkspaceRefusal(line) || SERVER_ENDED.test(line))) {
+    apiMigrating = false;
+    // A stop that has been waiting for the migration gives the server its time to stop from now.
+    stopUnderWay?.graceAnew();
+  }
   // No saved file frees a port or makes a workspace open, so waiting for the next restart would
   // be waiting for nothing.
   if ((isBusyPortMessage(line, apiPort) || isWorkspaceRefusal(line)) && !stopping) {
@@ -255,7 +327,13 @@ start(
 start("web", 35, [viteCli], { ...withoutSdkVariables(process.env), ...ports }, onWebLine);
 leaveGuard();
 
-const [apiReady, webReady] = await Promise.all([waitUntil(() => apiUp), waitUntil(() => webUp)]);
+const [apiReady, webReady] = await Promise.all([
+  waitUntil(
+    () => apiUp,
+    () => apiMigrating,
+  ),
+  waitUntil(() => webUp),
+]);
 if (!stopping) {
   if (apiReady && webReady) say(`Hubber działa w trybie deweloperskim: ${webOrigin} (Ctrl-C kończy pracę).`);
   else

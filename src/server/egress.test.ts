@@ -26,7 +26,7 @@ import {
   spawnNode,
   TEST_WORKSPACE,
 } from "./testing.ts";
-import { createTestWorkspace, type TestWorkspace } from "./workspace/testing.ts";
+import { createTestWorkspace, createUnmigratedTestWorkspace, type TestWorkspace } from "./workspace/testing.ts";
 
 const HOST = "127.0.0.1";
 const OBSERVER = join(import.meta.dirname, "egress-observer.ts");
@@ -329,8 +329,10 @@ let refusals: string;
 let production: string;
 let client: string;
 let logs = 0;
-// The throwaway workspace that every server of this file opens.
+// The throwaway workspace that every server of this file opens, unless its test names another.
 let workspace: TestWorkspace;
+// The workspaces of single tests, removed after each.
+const workspaces: TestWorkspace[] = [];
 
 beforeAll(() => {
   workDir = mkdtempSync(join(tmpdir(), "hubber-egress-"));
@@ -360,6 +362,7 @@ afterAll(() => {
 
 afterEach(async () => {
   for (const child of children.splice(0)) child.kill("SIGKILL");
+  for (const created of workspaces.splice(0)) created.remove();
   for (const sink of sinks.splice(0)) sink.close();
   await taken?.release();
   taken = undefined;
@@ -844,6 +847,8 @@ describe("what leaves the process (NFR-1)", { timeout: TEST_TIMEOUT_MS }, () => 
     lastLine: string;
     /** What the start has to say on stderr; nothing, unless given. */
     stderr?: string;
+    /** The workspace to open in place of this file's own. */
+    workspace?: TestWorkspace;
   }
   // Each start is a server that has what it would take to call out: the address its workspace
   // is pinned to and, in all but one, a credential for it.
@@ -856,6 +861,18 @@ describe("what leaves the process (NFR-1)", { timeout: TEST_TIMEOUT_MS }, () => 
     return {
       env: { HUBBER_CREDENTIALS_FILE: file },
       lastLine: `Poświadczenia: polecenie pomocnicze "/usr/bin/true" (z pliku "${file}").`,
+    };
+  };
+  /**
+   * A workspace as it was created before the application had a schema: the start has to bring its
+   * database up to date first, with a copy of it, and says so on stderr when it is done.
+   */
+  const withMigration = (): Pick<Start, "workspace" | "stderr"> => {
+    const unmigrated = createUnmigratedTestWorkspace();
+    workspaces.push(unmigrated);
+    return {
+      workspace: unmigrated,
+      stderr: `Baza zaktualizowana. Kopia sprzed aktualizacji: "${unmigrated.dir}/backups/`,
     };
   };
   /** A home directory with nothing in it: no credentials file, and no workspace at the default place. */
@@ -880,19 +897,27 @@ describe("what leaves the process (NFR-1)", { timeout: TEST_TIMEOUT_MS }, () => 
     ["that has a home directory and no credential", () => ({ script: production, ...withHome() })],
     // The command is for the first call of the model. A start must not run it.
     ["whose credential is a helper command", () => ({ script: production, ...withHelper() })],
+    // A start that migrates does more than any other before it answers: it copies the database
+    // and rewrites it. None of that is a reason to call out, or to start a program.
+    [
+      "that has to migrate the database of its workspace first",
+      () => ({ script: production, env: withToken, lastLine: CREDENTIAL_LINE, ...withMigration() }),
+    ],
   ])("is nothing at all for the server %s, from its start through requests to its shutdown", async (_which, launch) => {
     const [port] = await freePorts(1);
     const { env, records } = observation();
-    const { script, env: own, lastLine, stderr = "" } = launch();
+    const { script, env: own, lastLine, stderr = "", workspace: opened = workspace } = launch();
 
-    const server = spawnNode(script, { env: { ...env, ...workspace.env, ...own, HUBBER_PORT: String(port) } });
+    const server = spawnNode(script, { env: { ...env, ...opened.env, ...own, HUBBER_PORT: String(port) } });
     await started(server, lastLine);
     const statuses = await use(port);
     server.child.kill("SIGTERM");
     expect(await server.exited, server.stderr()).toEqual({ code: 0, signal: null });
 
     // It ran on the workspace, with nothing to say on stderr about that or about the observer.
-    expect(server.stdout()).toContain(`Workspace „${TEST_WORKSPACE.name}”: katalog "${workspace.dir}"`);
+    expect(server.stdout()).toContain(`Workspace „${TEST_WORKSPACE.name}”: katalog "${opened.dir}"`);
+    // And the start that had to migrate did: the copy from before is there.
+    if (opened !== workspace) expect(readdirSync(join(opened.dir, "backups"))).toHaveLength(1);
     expect(server.stderr()).toContain(stderr);
     if (stderr === "") expect(server.stderr()).toBe("");
     // The requests were the server's to answer: those of the page got through its guard (there
@@ -931,6 +956,20 @@ describe("what leaves the process (NFR-1)", { timeout: TEST_TIMEOUT_MS }, () => 
       2,
       () => ({ ...workspace.env, ANTHROPIC_BASE_URL: "router.corp.example" }),
       "nie nadaje się na adres endpointu",
+    ],
+    // The three above end before the database is opened. This one opens it, announces the update
+    // and is refused where the update begins: something that is no directory lies where the copies
+    // go. It has the address and the credential, as a start that would go on to serve has.
+    [
+      "the database of its workspace has to be migrated and cannot be copied first",
+      1,
+      () => {
+        const unmigrated = createUnmigratedTestWorkspace();
+        workspaces.push(unmigrated);
+        writeFileSync(join(unmigrated.dir, "backups"), "");
+        return { ...unmigrated.env, ANTHROPIC_BASE_URL: TEST_WORKSPACE.endpoint, ANTHROPIC_AUTH_TOKEN: TOKEN };
+      },
+      "nie udało się zrobić kopii bazy przed aktualizacją",
     ],
   ])("is nothing at all for a server that refuses to start because %s", async (_why, code, environment, reason) => {
     const [port] = await freePorts(1);

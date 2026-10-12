@@ -76,6 +76,7 @@ describe("readWorkspace", () => {
       config: join(dir, "workspace.json"),
       database: join(dir, "hubber.sqlite"),
       files: join(dir, "files"),
+      backups: join(dir, "backups"),
     });
     expect(found.config).toMatchObject({ schemaVersion: 1, name: TEST_WORKSPACE.name, profile: TEST_PROFILE });
     expect(found.warnings).toEqual([]);
@@ -93,6 +94,8 @@ describe("readWorkspace", () => {
     const { dir } = workspace();
     writeFileSync(join(dir, "hubber.sqlite-wal"), "");
     writeFileSync(join(dir, "kopia-przed-migracja.sqlite"), "");
+    // What a workspace has once its database was migrated: the directory with the copies.
+    mkdirSync(join(dir, "backups"));
 
     expect(read(dir).warnings).toEqual([]);
   });

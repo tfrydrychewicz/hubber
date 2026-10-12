@@ -13,6 +13,13 @@ import { REPOSITORY_ROOT } from "./workspace/layout.ts";
 import { type OpenWorkspace, openWorkspace } from "./workspace/open.ts";
 
 const SHUTDOWN_DEADLINE_MS = 3_000;
+/** What a terminal sends for Ctrl-C and when it is closed, and what "kill" sends. */
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+
+/** Ends a start that was asked to stop before it had opened the workspace. */
+class StartInterrupted extends Error {
+  override name = "StartInterrupted";
+}
 
 /**
  * The environment to read, and the directory where the built web app is expected. The environment
@@ -24,6 +31,16 @@ export type RunServerOptions = Pick<ServerConfigDeps, "env" | "webRoot">;
 function fail(message: string, exitCode: number): never {
   console.error(message);
   process.exit(exitCode);
+}
+
+/**
+ * Resolves once the event loop has looked for input from beginning to end: whatever the system
+ * held for this process when the call was made, a signal for one, has been handed to its
+ * listeners by then. Two rounds, because the first may be the rest of a look that had begun
+ * before the call, and that one hands on only what it had found at its beginning.
+ */
+function pendingInputHandled(): Promise<void> {
+  return new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
 }
 
 function readConfig({ env, webRoot }: RunServerOptions): ServerConfig {
@@ -48,6 +65,16 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   // The place of the workspace is one of the settings. The app gets the open workspace instead.
   const { workspace: location, ...config } = readConfig(options);
 
+  // From here until the start is over a signal is only noted. Without a listener it would end
+  // the process on the spot, and opening the workspace can migrate its database: with a listener
+  // registered the migration runs to its commit, because it is one synchronous piece of work and
+  // Node hands a signal to a listener only between two turns of its event loop.
+  let signalled = false;
+  const noteSignal = () => {
+    signalled = true;
+  };
+  for (const signal of SIGNALS) process.on(signal, noteSignal);
+
   let workspace: OpenWorkspace | undefined;
   const server = await startServer({
     port: config.port,
@@ -56,9 +83,12 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     // same port never touches the database. The port handed in always equals config.port: only
     // tests ask for port 0.
     app: ({ port }) => {
+      // A signal that was noted before the port was bound: the workspace is not opened at all.
+      if (signalled) throw new StartInterrupted();
       // Node accepts no connection before the app exists, so nothing answers on the port until
-      // the workspace has turned out to be the right one. A refusal ends the start.
-      workspace = openWorkspace(location, options.env);
+      // the workspace has turned out to be the right one. A refusal ends the start. The lines of
+      // a start that migrates go to stderr: the address stays the first line of stdout.
+      workspace = openWorkspace(location, options.env, undefined, { log: (line) => console.error(line) });
       return createApp({
         ...config,
         port,
@@ -69,12 +99,20 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     // The app could not be built although the workspace was open: closed here, the database is
     // left as one file.
     workspace?.close();
+    // Nothing was opened, so there is nothing to close: the start ends as the signal asked.
+    if (error instanceof StartInterrupted) {
+      console.error("Przerwano uruchamianie przed otwarciem workspace'u.");
+      process.exit(0);
+    }
     if (error instanceof PortInUseError) fail(busyPortMessage(config.port, "HUBBER_PORT"), EXIT_FAILURE);
     if (error instanceof WorkspaceError) fail(error.message, error.exitCode);
     throw error;
   });
   // Set by the app function, which has run by now: startServer() resolves only after it returned.
   const opened = workspace as unknown as OpenWorkspace;
+  // A signal that arrived while the workspace was being opened is still with the system. It is
+  // handed to the listener above before anything here goes by what that listener noted.
+  await pendingInputHandled();
 
   // Created only now, after every check of the pin. Creating it reads nothing; status() below
   // reads the environment and the credentials file, and never runs the helper command.
@@ -97,7 +135,19 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     deadlineMs: SHUTDOWN_DEADLINE_MS,
   });
   // Registered before the address is printed: whoever waits for that line may signal at once.
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, shutdown);
+  // And before the listener of the start is taken away, in this order: a signal that finds no
+  // listener ends the process on the spot, with the database open, and when the last listener for
+  // a signal goes, Node drops a signal that has arrived for it and was not handed out yet.
+  for (const signal of SIGNALS) {
+    process.on(signal, shutdown);
+    process.off(signal, noteSignal);
+  }
+  // Asked to stop during the start, a migration included: the server closes what it has opened
+  // and never announces an address.
+  if (signalled) {
+    shutdown();
+    return;
+  }
 
   const address = `http://${server.hostname}:${server.port}`;
   console.log(

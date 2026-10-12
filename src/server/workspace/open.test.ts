@@ -1,15 +1,23 @@
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.ts";
+import {
+  MIGRATIONS_DIR,
+  MIGRATIONS_TABLE,
+  MigrationError,
+  MigrationFilesError,
+  readMigrations,
+  schemaFingerprint,
+} from "../db/migrate.ts";
 import { TEST_WORKSPACE } from "../testing.ts";
 import type { LlmProfile } from "./config.ts";
 import { APPLICATION_ID, readWorkspacePin } from "./database.ts";
-import { isWorkspaceRefusal, WorkspaceError } from "./errors.ts";
+import { isMigrationDone, isMigrationNotice, isWorkspaceRefusal, WorkspaceError } from "./errors.ts";
 import { type OpenWorkspace, openWorkspace } from "./open.ts";
-import { createTestWorkspace, TEST_PROFILE, type TestWorkspace } from "./testing.ts";
+import { createTestWorkspace, createUnmigratedTestWorkspace, TEST_PROFILE, type TestWorkspace } from "./testing.ts";
 import { DIRECT_TRANSPORT, type TransportState } from "./transport.ts";
 
 // What reading the process gives, for the one test that lets openWorkspace() read it: the test
@@ -21,6 +29,48 @@ vi.mock("./transport.ts", async (importOriginal) => {
   return { ...real, readTransportState: () => processState.found ?? real.readTransportState() };
 });
 
+// The runner is the real one, unless a test sets what it is to throw: most of what can go wrong in
+// a migration cannot be brought about with the migrations of this code. With "afterNotice" it
+// throws as a runner does that had something to apply: once it has told its caller so.
+const runner = vi.hoisted(() => ({ failure: undefined as Error | undefined, afterNotice: false }));
+vi.mock("../db/migrate.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../db/migrate.ts")>();
+  return {
+    ...real,
+    migrateDatabase: (...args: Parameters<typeof real.migrateDatabase>) => {
+      if (runner.failure === undefined) return real.migrateDatabase(...args);
+      if (runner.afterNotice) args[1].onPending?.({ pending: ["0002_next"] });
+      throw runner.failure;
+    },
+  };
+});
+
+// A connection of the application waits five seconds for a file that another connection holds.
+// With a number set here, every connection waits that many milliseconds instead. With a code set
+// here, the checkpoint that a connection asks for fails with it: what a disk gives that has room
+// for a commit and none for folding the log back into the file.
+const sqlite = vi.hoisted(() => ({
+  timeout: undefined as number | undefined,
+  checkpointFails: undefined as string | undefined,
+}));
+vi.mock("better-sqlite3", async (importOriginal) => {
+  const { default: Real } = await importOriginal<{ default: typeof Database }>();
+  return {
+    default: class extends Real {
+      constructor(file: string, options: Database.Options = {}) {
+        super(file, sqlite.timeout === undefined ? options : { ...options, timeout: sqlite.timeout });
+      }
+
+      override pragma(source: string, options?: Database.PragmaOptions): unknown {
+        if (sqlite.checkpointFails !== undefined && source.startsWith("wal_checkpoint")) {
+          throw Object.assign(new Error("reported by SQLite"), { code: sqlite.checkpointFails });
+        }
+        return super.pragma(source, options);
+      }
+    },
+  };
+});
+
 const ROUTER = "https://router.corp.example/llm";
 const OTHER = "https://other.corp.example";
 const LAYOUT = ["files", "hubber.sqlite", "workspace.json"];
@@ -28,10 +78,16 @@ const RESTORE_HINT = "Odtwórz cały katalog z kopii zapasowej.";
 
 const workspaces: TestWorkspace[] = [];
 const opened: OpenWorkspace[] = [];
+const connections: Database.Database[] = [];
 
 afterEach(() => {
   processState.found = undefined;
+  runner.failure = undefined;
+  runner.afterNotice = false;
+  sqlite.timeout = undefined;
+  sqlite.checkpointFails = undefined;
   for (const workspace of opened.splice(0)) workspace.close();
+  for (const db of connections.splice(0)) if (db.open) db.close();
   for (const workspace of workspaces.splice(0)) workspace.remove();
 });
 
@@ -351,6 +407,599 @@ describe("openWorkspace", () => {
       failure(dir);
 
       expect(entries(dir)).toEqual(LAYOUT);
+    });
+  });
+
+  // The fourth step: the database is brought to the schema of this code, after every check of the pin.
+  describe("the schema of the database", () => {
+    const MIGRATIONS = readMigrations();
+    const TAGS = MIGRATIONS.map(({ tag }) => tag);
+    const HEAD = MIGRATIONS.at(-1);
+    const NAMED = `Nie można otworzyć workspace'u „${TEST_WORKSPACE.name}”: `;
+    const UNCHANGED = "Baza nie została zmieniona.";
+    const TAKEN_BACK = "Zmiany zostały wycofane i baza jest w stanie sprzed uruchomienia.";
+    const ROLLED_BACK = `${TAKEN_BACK} To błąd tej wersji aplikacji: wróć do poprzedniej wersji kodu albo popraw migrację.`;
+    // For what SQLite says of the disk, the memory or the file: no fault of a migration.
+    const FREE_SPACE = "Zwolnij miejsce na dysku i uruchom aplikację ponownie.";
+    const NOT_THE_MIGRATION = "Ten kod oznacza kłopot z dyskiem, pamięcią albo plikiem bazy, a nie błąd w migracji.";
+    const CHECK_THE_DISK =
+      "Sprawdź dysk i dostęp do katalogu workspace'u, a potem uruchom aplikację ponownie; gdy błąd się powtarza, odtwórz cały katalog z kopii zapasowej.";
+    const MIGRATED_LAYOUT = ["backups", ...LAYOUT];
+    /** All that the database of a workspace held before the application had a schema: the pin with its triggers. */
+    const PIN_ALONE = [
+      "workspace_pin",
+      "workspace_pin_insert_once",
+      "workspace_pin_no_delete",
+      "workspace_pin_no_update",
+    ];
+
+    /** A workspace as it was created before the application had a schema: its database holds the pin and nothing else. */
+    function unmigrated(profile: Partial<LlmProfile> = { endpoint: ROUTER }): TestWorkspace {
+      const created = createUnmigratedTestWorkspace(profile);
+      workspaces.push(created);
+      return created;
+    }
+
+    /** Opens as the server does, with somebody to tell about a migration. */
+    function openTelling(dir: string): { found: OpenWorkspace; lines: string[] } {
+      const lines: string[] = [];
+      const found = openWorkspace({ dir, source: "variable" }, {}, DIRECT_TRANSPORT, {
+        log: (line) => lines.push(line),
+      });
+      opened.push(found);
+      return { found, lines };
+    }
+
+    /** A connection that goes around the checks, for looking at a database and for damaging one. */
+    function raw(dir: string): Database.Database {
+      const db = new Database(join(dir, "hubber.sqlite"));
+      connections.push(db);
+      return db;
+    }
+
+    const objectsOf = (db: Database.Database) =>
+      db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").pluck().all();
+    const copiesIn = (dir: string) =>
+      existsSync(join(dir, "backups")) ? readdirSync(join(dir, "backups")).sort() : [];
+
+    it("finds the database of a new workspace current: nothing is migrated, said or written", () => {
+      const { dir } = workspace();
+      const database = join(dir, "hubber.sqlite");
+      const before = { changed: statSync(database).mtimeMs, digest: digest(database) };
+
+      const { found, lines } = openTelling(dir);
+
+      expect(found.migration).toEqual({ applied: [], snapshot: null });
+      expect(lines).toEqual([]);
+      expect(schemaFingerprint(found.database)).toBe(HEAD?.schema);
+      found.close();
+      expect(entries(dir)).toEqual(LAYOUT);
+      expect({ changed: statSync(database).mtimeMs, digest: digest(database) }).toEqual(before);
+    });
+
+    it("migrates a workspace whose database holds the pin alone, with a copy of that database first, and says so", () => {
+      const { dir } = unmigrated();
+      const before = raw(dir);
+      // What such a workspace has: one table with its triggers, and format 1.
+      expect(objectsOf(before)).toEqual(PIN_ALONE);
+      expect(before.pragma("user_version", { simple: true })).toBe(1);
+      before.close();
+      expect(entries(dir)).toEqual(LAYOUT);
+
+      const { found, lines } = openTelling(dir);
+
+      const [copy] = copiesIn(dir);
+      expect(copiesIn(dir)).toEqual([expect.stringMatching(new RegExp(`^before-${TAGS[0]}-\\d{8}T\\d{9}Z\\.sqlite$`))]);
+      expect(found.migration).toEqual({ applied: TAGS, snapshot: join(dir, "backups", copy ?? "") });
+      expect(lines).toEqual([
+        `Baza workspace'u wymaga aktualizacji (${TAGS.join(", ")}). Robię kopię i aktualizuję; Ctrl-C zadziała po zakończeniu.`,
+        `Baza zaktualizowana. Kopia sprzed aktualizacji: "${join(dir, "backups", copy ?? "")}".`,
+      ]);
+      // The words that whoever reads the output of the server goes by.
+      expect(lines.map((line) => [isMigrationNotice(line), isMigrationDone(line)])).toEqual([
+        [true, false],
+        [false, true],
+      ]);
+      expect(schemaFingerprint(found.database)).toBe(HEAD?.schema);
+      expect(readWorkspacePin(found.database)).toEqual({ endpoint: ROUTER, createdAt: found.config.createdAt });
+      expect(found.database.pragma("user_version", { simple: true })).toBe(1);
+      expect(found.database.pragma("foreign_keys", { simple: true })).toBe(1);
+      // The copy holds what the workspace was: the pin alone.
+      const copied = new Database(join(dir, "backups", copy ?? ""), { readonly: true });
+      connections.push(copied);
+      expect(objectsOf(copied)).toEqual(PIN_ALONE);
+      found.close();
+      expect(entries(dir)).toEqual(MIGRATED_LAYOUT);
+      expect((statSync(join(dir, "backups")).mode & 0o777).toString(8)).toBe("700");
+      expect((statSync(join(dir, "backups", copy ?? "")).mode & 0o777).toString(8)).toBe("600");
+    });
+
+    // The update is committed and the log beside the file could not be folded back into it. The
+    // start goes on, and a third line says where the update is for the time being.
+    it.each<[string, string, string]>([
+      [
+        "the disk has no room for it",
+        "SQLITE_FULL",
+        "Na dysku brakuje miejsca: zmiany są na razie w pliku hubber.sqlite-wal obok bazy. Zwolnij miejsce.",
+      ],
+      [
+        "of anything else that SQLite reports",
+        "SQLITE_IOERR_WRITE",
+        "Nie udało się przenieść zmian do pliku bazy (SQLITE_IOERR_WRITE): są na razie w pliku hubber.sqlite-wal obok bazy. Sprawdź dysk i dostęp do katalogu workspace'u.",
+      ],
+    ])(
+      "says after the update that its changes are still in the log beside the database, when they could not be moved into the file because %s",
+      (_what, code, line) => {
+        const { dir } = unmigrated();
+        sqlite.checkpointFails = code;
+
+        const { found, lines } = openTelling(dir);
+
+        const copy = join(dir, "backups", copiesIn(dir)[0] ?? "");
+        expect(lines).toEqual([
+          `Baza workspace'u wymaga aktualizacji (${TAGS.join(", ")}). Robię kopię i aktualizuję; Ctrl-C zadziała po zakończeniu.`,
+          `Baza zaktualizowana. Kopia sprzed aktualizacji: "${copy}".`,
+          line,
+        ]);
+        // None of the lines that whoever reads the output of the server goes by.
+        expect([isMigrationNotice(line), isMigrationDone(line), isWorkspaceRefusal(line)]).toEqual([
+          false,
+          false,
+          false,
+        ]);
+        // What the line says is so: the workspace is open at the schema of this code, and the log holds the update.
+        expect(found.migration).toEqual({ applied: TAGS, snapshot: copy, checkpointFailed: code });
+        expect(schemaFingerprint(found.database)).toBe(HEAD?.schema);
+        expect(statSync(join(dir, "hubber.sqlite-wal")).size).toBeGreaterThan(0);
+      },
+    );
+
+    it("does it once: the next open finds the database current and makes no second copy", () => {
+      const { dir } = unmigrated();
+      openTelling(dir).found.close();
+      const copies = copiesIn(dir);
+
+      const { found, lines } = openTelling(dir);
+
+      expect(found.migration).toEqual({ applied: [], snapshot: null });
+      expect(lines).toEqual([]);
+      expect(copiesIn(dir)).toEqual(copies);
+    });
+
+    it("migrates without anybody to tell", () => {
+      const { dir } = unmigrated();
+
+      // As a caller without a log calls it.
+      expect(open(dir).migration.applied).toEqual(TAGS);
+    });
+
+    it.each<[string, (dir: string) => WorkspaceError]>([
+      [
+        "whose configuration file names another endpoint than its pin",
+        (dir) => {
+          editEndpoint(dir, OTHER);
+          return refusal(dir);
+        },
+      ],
+      ["in an environment that names another endpoint", (dir) => refusal(dir, { ANTHROPIC_BASE_URL: OTHER })],
+      ["in a process that would not connect directly", (dir) => refusal(dir, {}, { proxySupport: true })],
+    ])("migrates nothing in a workspace %s: the checks of the pin come first", (_what, refused) => {
+      const { dir } = unmigrated();
+
+      expect([2, 3]).toContain(refused(dir).exitCode);
+
+      expect(entries(dir)).toEqual(LAYOUT);
+      expect(objectsOf(raw(dir))).toEqual(PIN_ALONE);
+    });
+
+    describe("that cannot be brought up to date", () => {
+      /** The refusal of a start that needs a migration, with what all of them have in common. */
+      function reasonOf(dir: string): string {
+        const error = refusal(dir);
+        expect(error.exitCode).toBe(1);
+        expect(error.message.startsWith(NAMED)).toBe(true);
+        return error.message.slice(NAMED.length);
+      }
+
+      it.each<[string, MigrationError, (database: string) => string]>([
+        [
+          "a statement of a migration fails",
+          new MigrationError("statement-failed", { tag: "0002_next", statement: 3, code: "SQLITE_CONSTRAINT_CHECK" }),
+          () =>
+            `aktualizacja bazy nie powiodła się w migracji 0002_next (polecenie 3: SQLITE_CONSTRAINT_CHECK). ${ROLLED_BACK}`,
+        ],
+        [
+          "a statement of a migration fails because the disk is full",
+          new MigrationError("statement-failed", { tag: "0002_next", statement: 12, code: "SQLITE_FULL" }),
+          () =>
+            `aktualizacja bazy nie powiodła się w migracji 0002_next (polecenie 12: SQLITE_FULL), bo na dysku zabrakło miejsca. ${TAKEN_BACK} ${FREE_SPACE}`,
+        ],
+        ...[
+          "SQLITE_IOERR_WRITE",
+          "SQLITE_NOMEM",
+          "SQLITE_CORRUPT",
+          "SQLITE_NOTADB",
+          "SQLITE_READONLY",
+          "SQLITE_CANTOPEN",
+        ].map((code): [string, MigrationError, () => string] => [
+          `a statement of a migration fails with ${code}, which is no fault of the migration`,
+          new MigrationError("statement-failed", { tag: "0002_next", statement: 3, code }),
+          () =>
+            `aktualizacja bazy nie powiodła się w migracji 0002_next (polecenie 3: ${code}). ${NOT_THE_MIGRATION} ${TAKEN_BACK} ${CHECK_THE_DISK}`,
+        ]),
+        [
+          "a migration ended the transaction itself, with the copy that was kept for the way back",
+          new MigrationError("statement-failed", {
+            tag: "0002_next",
+            statement: 3,
+            code: "TRANSACTION_ENDED",
+            snapshot: "before-0002_next-20261011T120000000Z.sqlite",
+          }),
+          (database) =>
+            `migracja 0002_next sama zakończyła transakcję aktualizacji (polecenie 3), więc część jej zmian mogła zostać w bazie. Stan sprzed uruchomienia jest w kopii "${join(dirname(database), "backups", "before-0002_next-20261011T120000000Z.sqlite")}". To błąd tej wersji aplikacji: zanim uruchomisz ją ponownie, odtwórz bazę z tej kopii, a potem wróć do poprzedniej wersji kodu albo popraw migrację.`,
+        ],
+        [
+          "a migration ended the transaction itself and there is no copy",
+          new MigrationError("statement-failed", { tag: "0002_next", statement: 3, code: "TRANSACTION_ENDED" }),
+          () =>
+            "migracja 0002_next sama zakończyła transakcję aktualizacji (polecenie 3), więc część jej zmian mogła zostać w bazie. To błąd tej wersji aplikacji: zanim uruchomisz ją ponownie, odtwórz cały katalog z kopii zapasowej, a potem wróć do poprzedniej wersji kodu albo popraw migrację.",
+        ],
+        [
+          "rows would be left pointing at rows that do not exist",
+          new MigrationError("foreign-keys", { tag: "0002_next", table: "mentions", parent: "sources" }),
+          () =>
+            `aktualizacja bazy zostawiłaby rekordy wskazujące na nieistniejące obiekty (migracja 0002_next, tabela mentions, odwołanie do sources). ${ROLLED_BACK}`,
+        ],
+        [
+          "a migration leaves another schema than the one recorded for it",
+          new MigrationError("schema-drift", { tag: "0002_next", whileMigrating: true }),
+          () => `po migracji 0002_next schemat bazy różni się od zapisanego w kodzie. ${ROLLED_BACK}`,
+        ],
+        [
+          "the schema is not the one the migrations leave",
+          new MigrationError("schema-drift", { tag: "0001_first", whileMigrating: false }),
+          (database) =>
+            `schemat bazy "${database}" różni się od tego, który zostawiają migracje tej wersji (ostatnia: 0001_first): czegoś w nim brakuje albo coś zmieniono poza aplikacją. ${UNCHANGED} ${RESTORE_HINT}`,
+        ],
+        [
+          "the schema is not the one that the last migration the database has had leaves, and another one waits",
+          new MigrationError("schema-drift", { tag: "0001_first", whileMigrating: false, pendingTag: "0002_next" }),
+          (database) =>
+            `schemat bazy "${database}" różni się od tego, który zostawiła ostatnia wykonana na niej migracja (0001_first): czegoś w nim brakuje albo coś zmieniono poza aplikacją. Takiej bazy nie da się zaktualizować. ${UNCHANGED} ${RESTORE_HINT}`,
+        ],
+        [
+          "the database has had no migration and holds what the application did not make",
+          new MigrationError("schema-drift", { whileMigrating: false, pendingTag: "0001_first" }),
+          (database) =>
+            `baza "${database}" nie przeszła jeszcze żadnej migracji, a są w niej tabele albo inne obiekty, których nie utworzyła aplikacja. Takiej bazy nie da się zaktualizować. ${UNCHANGED} ${RESTORE_HINT}`,
+        ],
+        [
+          "another process has the workspace open",
+          new MigrationError("in-use", { code: "SQLITE_BUSY" }),
+          () =>
+            `baza wymaga aktualizacji, a workspace jest otwarty w innym procesie Hubbera. Zatrzymaj go i uruchom aplikację ponownie. ${UNCHANGED}`,
+        ],
+        [
+          "the disk has no room for the copy",
+          // Rounded apart: what is needed up, what is free down.
+          new MigrationError("no-space", { neededBytes: 711_000_001, freeBytes: 12_999_999 }),
+          () =>
+            `przed aktualizacją bazy trzeba zrobić jej kopię, a na dysku brakuje miejsca: sama kopia potrzebuje około 712 MB, a wolne jest 12 MB. Aktualizacja potrzebuje potem jeszcze dodatkowego miejsca. ${UNCHANGED}`,
+        ],
+        [
+          "the copy cannot be made",
+          new MigrationError("snapshot-failed", { code: "EACCES" }),
+          () =>
+            `nie udało się zrobić kopii bazy przed aktualizacją (EACCES). Bez kopii aktualizacja się nie zaczyna. ${UNCHANGED}`,
+        ],
+        [
+          "a newer version has migrated the database",
+          new MigrationError("newer", { databaseTag: "0003_later", codeTag: "0001_first" }),
+          (database) =>
+            `bazę "${database}" zaktualizowała nowsza wersja Hubbera (ostatnia migracja w bazie: 0003_later, ta wersja zna 0001_first). Uruchom wersję, która ją zaktualizowała, albo nowszą.`,
+        ],
+        [
+          "the database has another history than this code",
+          new MigrationError("diverged", { tag: "0001_first" }),
+          (database) =>
+            `historia migracji w bazie "${database}" różni się od tej wersji kodu (migracja 0001_first). ${UNCHANGED} Uruchom wersję aplikacji, która tę bazę aktualizowała.`,
+        ],
+      ])("says so in the owner's words when %s, and closes the database again", (_what, failure, words) => {
+        const { dir } = workspace();
+        runner.failure = failure;
+
+        expect(reasonOf(dir)).toBe(words(join(dir, "hubber.sqlite")));
+
+        // Closed, not abandoned: a database left open keeps its -wal and -shm files.
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
+
+      it("refuses a database whose schema was changed past the migrations, and leaves it as it is", () => {
+        const { dir } = workspace();
+        const outside = raw(dir);
+        const trigger = outside
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name <> 'workspace_pin' LIMIT 1")
+          .pluck()
+          .get() as string;
+        outside.exec(`DROP TRIGGER ${trigger}`);
+        outside.close();
+        const database = join(dir, "hubber.sqlite");
+        const before = digest(database);
+
+        expect(reasonOf(dir)).toBe(
+          `schemat bazy "${database}" różni się od tego, który zostawiają migracje tej wersji (ostatnia: ${HEAD?.tag}): czegoś w nim brakuje albo coś zmieniono poza aplikacją. ${UNCHANGED} ${RESTORE_HINT}`,
+        );
+
+        expect(entries(dir)).toEqual(LAYOUT);
+        expect(digest(database)).toBe(before);
+      });
+
+      it("refuses a database that a newer version migrated, and names the copy from before that update when it is there", () => {
+        const { dir } = unmigrated();
+        open(dir).close();
+        const database = join(dir, "hubber.sqlite");
+        const copy = "before-0099_later-20261011T120000000Z.sqlite";
+        const outside = raw(dir);
+        outside
+          .prepare(
+            `INSERT INTO ${MIGRATIONS_TABLE} (idx, tag, sha256, applied_at, snapshot) VALUES (?, '0099_later', 'x', '2026-10-11T12:00:00.000Z', ?)`,
+          )
+          .run(TAGS.length + 1, copy);
+        outside.close();
+        const newer = `bazę "${database}" zaktualizowała nowsza wersja Hubbera (ostatnia migracja w bazie: 0099_later, ta wersja zna ${HEAD?.tag}). Uruchom wersję, która ją zaktualizowała, albo nowszą.`;
+
+        // The copy is not there any more: only what to run is said.
+        expect(reasonOf(dir)).toBe(newer);
+
+        writeFileSync(join(dir, "backups", copy), "the state before that update");
+        expect(reasonOf(dir)).toBe(
+          `${newer} Stan sprzed tamtej aktualizacji jest w kopii "${join(dir, "backups", copy)}"; odtworzenie go usuwa wszystko, co zapisano później.`,
+        );
+        expect(entries(dir)).toEqual(MIGRATED_LAYOUT);
+      });
+
+      it("names as that copy only a file among the copies, whatever the record of the database says", () => {
+        const { dir } = unmigrated();
+        open(dir).close();
+        const outside = raw(dir);
+        // A record that somebody edited: the name leads out of the directory of the copies, to a file that exists.
+        outside
+          .prepare(
+            `INSERT INTO ${MIGRATIONS_TABLE} (idx, tag, sha256, applied_at, snapshot) VALUES (?, '0099_later', 'x', '2026-10-11T12:00:00.000Z', '../workspace.json')`,
+          )
+          .run(TAGS.length + 1);
+        outside.close();
+
+        expect(reasonOf(dir)).not.toContain("workspace.json");
+      });
+
+      it("refuses a database whose record of migrations is not the history of this code", () => {
+        const { dir } = workspace();
+        const outside = raw(dir);
+        outside.prepare(`UPDATE ${MIGRATIONS_TABLE} SET sha256 = 'edited' WHERE idx = 1`).run();
+        outside.close();
+        const database = join(dir, "hubber.sqlite");
+
+        expect(reasonOf(dir)).toBe(
+          `historia migracji w bazie "${database}" różni się od tej wersji kodu (migracja ${TAGS[0]}). ${UNCHANGED} Uruchom wersję aplikacji, która tę bazę aktualizowała.`,
+        );
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
+
+      it("takes a migration back whose statement fails, and leaves no copy: the database is what it was", () => {
+        const { dir } = unmigrated();
+        // Something is in the way of the first statement of the first migration: the name of the
+        // table it creates is taken. By an index on the table of the pin, which is no part of the
+        // schema that a start compares: a table of that name would be found before the migration.
+        const table = /CREATE TABLE (\w+)/.exec(MIGRATIONS[0]?.statements[0] ?? "")?.[1];
+        const outside = raw(dir);
+        outside.exec(`CREATE INDEX ${table} ON workspace_pin (endpoint)`);
+        const before = objectsOf(outside);
+        outside.close();
+
+        expect(reasonOf(dir)).toBe(
+          `aktualizacja bazy nie powiodła się w migracji ${TAGS[0]} (polecenie 1: SQLITE_ERROR). ${ROLLED_BACK}`,
+        );
+
+        expect(objectsOf(raw(dir))).toEqual(before);
+        // The directory for the copies was made; the copy went with the migration.
+        expect(copiesIn(dir)).toEqual([]);
+      });
+
+      it("refuses a database that was changed past the application before its first migration, and begins nothing", () => {
+        const { dir } = unmigrated();
+        const outside = raw(dir);
+        outside.exec("CREATE TABLE notatki_wlasne (x TEXT)");
+        outside.close();
+        const database = join(dir, "hubber.sqlite");
+        const before = digest(database);
+        const lines: string[] = [];
+
+        let error: unknown;
+        try {
+          openWorkspace({ dir, source: "variable" }, {}, DIRECT_TRANSPORT, { log: (line) => lines.push(line) });
+        } catch (thrown) {
+          error = thrown;
+        }
+
+        // The reason is the database as it was found, and no migration is blamed for it.
+        expect((error as WorkspaceError).message).toBe(
+          `${NAMED}baza "${database}" nie przeszła jeszcze żadnej migracji, a są w niej tabele albo inne obiekty, których nie utworzyła aplikacja. Takiej bazy nie da się zaktualizować. ${UNCHANGED} ${RESTORE_HINT}`,
+        );
+        expect((error as WorkspaceError).exitCode).toBe(1);
+        // Nothing was announced, copied or written.
+        expect(lines).toEqual([]);
+        expect(entries(dir)).toEqual(LAYOUT);
+        expect(digest(database)).toBe(before);
+      });
+
+      const NOT_THE_WORKSPACE = "To błąd kopii kodu aplikacji, a nie workspace'u";
+
+      it.each<[string, () => MigrationFilesError, (dir: string) => string]>([
+        [
+          "a migration file holds other bytes than its manifest entry says",
+          () =>
+            new MigrationFilesError(MIGRATIONS_DIR, "Migration 0001_init differs from its entry in manifest.json.", {
+              changedFile: join(MIGRATIONS_DIR, "0001_init.sql"),
+            }),
+          () =>
+            `plik migracji "${join(MIGRATIONS_DIR, "0001_init.sql")}" ma inną treść niż ta, którą zapisano dla niego w pliku manifest.json. ${UNCHANGED} ${NOT_THE_WORKSPACE}: przywróć ten plik z repozytorium. Jego treść zmienia także narzędzie, które przepisuje końce wierszy. Gdy to nowa migracja, nad którą pracujesz, wklej do manifest.json wpis, który wypisuje test src/server/db/migrations.test.ts.`,
+        ],
+        [
+          "a file of the migrations is missing",
+          () =>
+            new MigrationFilesError(MIGRATIONS_DIR, "ENOENT: no such file or directory, open", {
+              missingFile: join(MIGRATIONS_DIR, "0002_next.sql"),
+            }),
+          () =>
+            `w katalogu migracji tej wersji aplikacji brakuje pliku "${join(MIGRATIONS_DIR, "0002_next.sql")}". ${UNCHANGED} ${NOT_THE_WORKSPACE}: przywróć ten plik z repozytorium albo dokończ przerwaną aktualizację kodu.`,
+        ],
+        [
+          "a file of the migrations cannot be read",
+          () =>
+            new MigrationFilesError(MIGRATIONS_DIR, "EACCES: permission denied, open", {
+              unreadablePath: join(MIGRATIONS_DIR, "manifest.json"),
+              code: "EACCES",
+            }),
+          () =>
+            `nie udało się odczytać pliku "${join(MIGRATIONS_DIR, "manifest.json")}" z katalogu migracji tej wersji aplikacji (EACCES). ${UNCHANGED} ${NOT_THE_WORKSPACE}: sprawdź prawa dostępu do katalogu migracji albo przywróć go z repozytorium.`,
+        ],
+        [
+          "the folder holds a migration file that the manifest does not list",
+          () =>
+            new MigrationFilesError(MIGRATIONS_DIR, "The migration file 0001_init copy.sql is not listed.", {
+              unlistedFile: join(MIGRATIONS_DIR, "0001_init copy.sql"),
+            }),
+          () =>
+            `w katalogu migracji tej wersji aplikacji jest plik "${join(MIGRATIONS_DIR, "0001_init copy.sql")}", którego nie wymienia manifest.json. ${UNCHANGED} ${NOT_THE_WORKSPACE}: usuń ten plik, jeśli jest kopią zostawioną przez edytor albo menedżer plików, albo dokończ przerwaną aktualizację kodu. Gdy to nowa migracja, nad którą pracujesz, dopisz ją do manifest.json.`,
+        ],
+        [
+          "the manifest of the migrations is empty or cut short",
+          () =>
+            new MigrationFilesError(
+              MIGRATIONS_DIR,
+              "manifest.json cannot be read as JSON: Unexpected end of JSON input",
+              { damagedManifest: join(MIGRATIONS_DIR, "manifest.json") },
+            ),
+          () =>
+            `plik "${join(MIGRATIONS_DIR, "manifest.json")}" w katalogu migracji tej wersji aplikacji jest niepełny albo uszkodzony. ${UNCHANGED} ${NOT_THE_WORKSPACE}: przywróć ten plik z repozytorium albo dokończ przerwaną aktualizację kodu.`,
+        ],
+        [
+          "the folder of the migrations breaks a rule that only a migration in the making can break",
+          () =>
+            new MigrationFilesError(
+              MIGRATIONS_DIR,
+              "Migration 0002_next, statement 3: a foreign key with an action is not allowed.",
+            ),
+          () =>
+            `migracji tej wersji aplikacji nie da się odczytać z katalogu "${MIGRATIONS_DIR}". ${UNCHANGED} ${NOT_THE_WORKSPACE}: przywróć ten katalog z repozytorium albo popraw migrację, nad którą pracujesz. Szczegóły: Migration 0002_next, statement 3: a foreign key with an action is not allowed.`,
+        ],
+      ])("says in the owner's words that the code is at fault when %s, with exit code 1", (_what, failure, words) => {
+        const { dir } = workspace();
+        runner.failure = failure();
+
+        expect(reasonOf(dir)).toBe(words(dir));
+
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
+
+      it("refuses to migrate while another connection has the database open, and changes nothing", () => {
+        const { dir } = unmigrated();
+        const holder = raw(dir);
+        // Idle, as a server between two requests is; its first read is what keeps the file shared.
+        holder.prepare("SELECT count(*) FROM sqlite_schema").get();
+        sqlite.timeout = 100;
+
+        expect(reasonOf(dir)).toBe(
+          `baza wymaga aktualizacji, a workspace jest otwarty w innym procesie Hubbera. Zatrzymaj go i uruchom aplikację ponownie. ${UNCHANGED}`,
+        );
+
+        expect(objectsOf(holder)).toEqual(PIN_ALONE);
+        expect(existsSync(join(dir, "backups"))).toBe(false);
+        // Once the other one is gone, the same start goes through.
+        holder.close();
+        expect(open(dir).migration.applied).toEqual(TAGS);
+      });
+
+      it("says that the database is busy when another process holds it for itself, as a start that migrates does", () => {
+        const { dir } = workspace();
+        const holder = raw(dir);
+        holder.pragma("locking_mode = EXCLUSIVE");
+        holder.exec("BEGIN IMMEDIATE; COMMIT");
+        sqlite.timeout = 100;
+
+        expect(reasonOf(dir)).toBe(
+          `baza "${join(dir, "hubber.sqlite")}" jest zajęta przez inny proces Hubbera (trwa jej aktualizacja albo zamykanie). Spróbuj ponownie za chwilę.`,
+        );
+      });
+
+      it("says the same when the database turns out to be busy only while it is being brought up to date", () => {
+        const { dir } = workspace();
+        runner.failure = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" });
+
+        expect(reasonOf(dir)).toBe(
+          `baza "${join(dir, "hubber.sqlite")}" jest zajęta przez inny proces Hubbera (trwa jej aktualizacja albo zamykanie). Spróbuj ponownie za chwilę.`,
+        );
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
+
+      it("words whatever else SQLite reports before a migration was begun as a database that cannot be opened", () => {
+        const { dir } = workspace();
+        // What a file that cannot be read gives while the start looks at what the database has had.
+        runner.failure = Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR_READ" });
+
+        const error = refusal(dir);
+
+        expect(error.exitCode).toBe(1);
+        expect(error.message).toBe(
+          `Nie można otworzyć workspace'u: nie udało się otworzyć bazy "${join(dir, "hubber.sqlite")}" (SQLITE_IOERR_READ).`,
+        );
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
+
+      it.each<[string, string, string]>([
+        [
+          "the disk fills up at the commit",
+          "SQLITE_FULL",
+          `aktualizacja bazy nie powiodła się (SQLITE_FULL), bo na dysku zabrakło miejsca. ${TAKEN_BACK} ${FREE_SPACE}`,
+        ],
+        [
+          "the drive fails at the commit",
+          "SQLITE_IOERR_FSYNC",
+          `aktualizacja bazy nie powiodła się (SQLITE_IOERR_FSYNC). ${NOT_THE_MIGRATION} ${TAKEN_BACK} ${CHECK_THE_DISK}`,
+        ],
+        [
+          "the runner's own record cannot be written",
+          "SQLITE_CONSTRAINT_PRIMARYKEY",
+          `aktualizacja bazy nie powiodła się (SQLITE_CONSTRAINT_PRIMARYKEY). ${ROLLED_BACK}`,
+        ],
+      ])(
+        "says that the update failed, and that it was taken back, when %s: an error of SQLite that is no failed statement",
+        (_what, code, words) => {
+          const { dir } = workspace();
+          runner.failure = Object.assign(new Error("reported by SQLite"), { code });
+          runner.afterNotice = true;
+
+          expect(reasonOf(dir)).toBe(words);
+          expect(entries(dir)).toEqual(LAYOUT);
+        },
+      );
+
+      it("still says that the database is busy when SQLite reports that after the notice", () => {
+        const { dir } = workspace();
+        runner.failure = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        runner.afterNotice = true;
+
+        expect(reasonOf(dir)).toContain("jest zajęta przez inny proces Hubbera");
+      });
+
+      it("leaves an error that is a mistake in the code as it is, and closes the database all the same", () => {
+        const { dir } = workspace();
+        runner.failure = new TypeError("not a refusal");
+
+        expect(() => open(dir)).toThrow(TypeError);
+        expect(entries(dir)).toEqual(LAYOUT);
+      });
     });
   });
 

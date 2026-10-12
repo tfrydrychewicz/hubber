@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -18,7 +19,9 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { readMigrations, schemaFingerprint } from "./db/migrate.ts";
 import {
   type Exit,
   freePorts,
@@ -29,7 +32,13 @@ import {
   spawnNode,
   TEST_WORKSPACE,
 } from "./testing.ts";
-import { createTestWorkspace, createTestWorkspaceAt, type TestWorkspace } from "./workspace/testing.ts";
+import {
+  createTestWorkspace,
+  createTestWorkspaceAt,
+  createUnmigratedTestWorkspace,
+  scanWorkspaceForSecret,
+  type TestWorkspace,
+} from "./workspace/testing.ts";
 
 const MAIN = join(import.meta.dirname, "main.ts");
 const RUN_SERVER = join(import.meta.dirname, "run-server.ts");
@@ -57,6 +66,58 @@ console.log = (...args) => {
   console.log = log;
   log(...args);
   process.kill(process.pid, "SIGTERM");
+};
+`;
+
+// Loaded before the entry point. It sends the process a signal from inside the call that prints
+// the first line on stderr. For a start that has to migrate a database, that line is the notice
+// it gives before the work: the signal arrives while the workspace is being opened. Which signal
+// is named in the address this module is loaded from.
+const SIGNAL_AT_FIRST_ERROR_LINE = `const signal = new URL(import.meta.url).searchParams.get("signal");
+const { error } = console;
+console.error = (...args) => {
+  console.error = error;
+  error(...args);
+  process.kill(process.pid, signal);
+};
+`;
+
+// Loaded before the entry point. Stands in for a signal that reaches the process at the moment
+// the start gives its signals over to the handler of the shutdown: it is sent from inside the
+// first call that takes a listener of the start away, before that call does its work ("before")
+// or right after it ("after"). Which signal and which moment are named in the address this module
+// is loaded from. A process that has no listener for the signal at that moment ends by it, and
+// one that takes its last listener away with a signal still on its way to it never hears of it.
+const SIGNAL_AT_THE_HANDOVER = `const options = new URL(import.meta.url).searchParams;
+const signal = options.get("signal");
+const { off } = process;
+let sent = false;
+process.off = function (name, listener) {
+  const send = name === signal && !sent;
+  if (send) sent = true;
+  if (send && options.get("moment") === "before") process.kill(process.pid, signal);
+  const result = off.call(this, name, listener);
+  if (send && options.get("moment") === "after") process.kill(process.pid, signal);
+  return result;
+};
+`;
+
+// Loaded before the entry point. Stands in for a signal that arrives before the port is bound:
+// the signal is sent when the server asks for its port, and the port is asked for in earnest
+// only once the listeners of the process have been told. A server that registered its own
+// listener before it asked is told first; the one added here is told last. The timer keeps the
+// process alive meanwhile: a listener for a signal does not, and nothing else is under way yet.
+const SIGNAL_BEFORE_THE_PORT = `import net from "node:net";
+const { listen } = net.Server.prototype;
+net.Server.prototype.listen = function (...args) {
+  net.Server.prototype.listen = listen;
+  const waiting = setTimeout(() => {}, 10_000);
+  process.once("SIGTERM", () => {
+    clearTimeout(waiting);
+    listen.apply(this, args);
+  });
+  process.kill(process.pid, "SIGTERM");
+  return this;
 };
 `;
 
@@ -97,6 +158,9 @@ let workDir: string;
 let webRoot: string;
 let productionEntry: string;
 let signalAtFirstLine: string;
+let signalAtFirstErrorLine: string;
+let signalAtTheHandover: string;
+let signalBeforeThePort: string;
 let reportProcessState: string;
 // Ways of switching a proxy on that are files: a Node configuration file, a file of variables,
 // and modules to load before the entry point.
@@ -136,6 +200,12 @@ beforeAll(() => {
 
   signalAtFirstLine = join(workDir, "signal-at-first-line.mjs");
   writeFileSync(signalAtFirstLine, SIGNAL_AT_FIRST_LINE);
+  signalAtFirstErrorLine = join(workDir, "signal-at-first-error-line.mjs");
+  writeFileSync(signalAtFirstErrorLine, SIGNAL_AT_FIRST_ERROR_LINE);
+  signalAtTheHandover = join(workDir, "signal-at-the-handover.mjs");
+  writeFileSync(signalAtTheHandover, SIGNAL_AT_THE_HANDOVER);
+  signalBeforeThePort = join(workDir, "signal-before-the-port.mjs");
+  writeFileSync(signalBeforeThePort, SIGNAL_BEFORE_THE_PORT);
   reportProcessState = join(workDir, "report-process-state.mjs");
   writeFileSync(reportProcessState, REPORT_PROCESS_STATE);
 
@@ -259,6 +329,13 @@ function accepts(port: number): Promise<boolean> {
   });
 }
 
+/** Node options that load a stand-in ahead of the entry point, with what it is told in its address. */
+function loading(standIn: string, settings: Record<string, string> = {}): string[] {
+  const address = pathToFileURL(standIn);
+  for (const [name, value] of Object.entries(settings)) address.searchParams.set(name, value);
+  return ["--import", address.href];
+}
+
 /** A throwaway workspace of the test's own, for a test that changes it or looks at what a start leaves in it. */
 function ownWorkspace(...profile: Parameters<typeof createTestWorkspace>): TestWorkspace {
   const created = createTestWorkspace(...profile);
@@ -372,6 +449,36 @@ describe("main", { timeout: START_TIMEOUT_MS + 5_000 }, () => {
     expect(server.stdout()).toContain("Zamykanie serwera…");
     expect(readdirSync(workspace.dir).sort()).toEqual(LAYOUT);
   });
+
+  // The start notes a signal with a listener of its own until the workspace is open, and the
+  // shutdown has its handler from then on. A signal can arrive at the very moment between the two.
+  describe.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+    "on %s at the moment the start hands its signals over",
+    (signal) => {
+      it.each([
+        ["while it is still on its way when the listener of the start is taken away", "before"],
+        ["right after the listener of the start is gone", "after"],
+      ])("shuts down in order %s", async (_when, moment) => {
+        const workspace = ownWorkspace();
+        const [port] = await freePorts(1);
+
+        const server = launch(
+          { HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN },
+          { nodeArgs: loading(signalAtTheHandover, { signal, moment }), workspace },
+        );
+
+        // Not lost, which would leave the server running, and not left to the system, which would
+        // end the process on the spot with its database open.
+        const stillRunning = new Promise<string>((resolve) =>
+          setTimeout(() => resolve("still running"), START_TIMEOUT_MS),
+        );
+        expect(await Promise.race([server.exited, stillRunning]), server.stdout()).toEqual({ code: 0, signal: null });
+        expect(server.stdout()).toContain("Zamykanie serwera…");
+        expect(await accepts(port)).toBe(false);
+        expect(readdirSync(workspace.dir).sort()).toEqual(LAYOUT);
+      });
+    },
+  );
 
   it("ends a connection that would never finish, and survives a repeated signal", async () => {
     const server = await launchDev();
@@ -640,6 +747,237 @@ ${WITHOUT_CREDENTIAL}
 
       expect(await stop(server)).toEqual({ code: 0, signal: null });
       expect(readdirSync(workspace.dir).sort()).toEqual(LAYOUT);
+    });
+  });
+
+  // A workspace that an earlier version created or last opened: the start brings its database to
+  // the schema of this code before anything answers on the port.
+  describe("on a workspace whose database is of an earlier version", () => {
+    const MIGRATIONS = readMigrations();
+    const TAGS = MIGRATIONS.map(({ tag }) => tag);
+    const NOTICE = `Baza workspace'u wymaga aktualizacji (${TAGS.join(", ")}). Robię kopię i aktualizuję; Ctrl-C zadziała po zakończeniu.\n`;
+    const CREDENTIAL = { ANTHROPIC_BASE_URL: TEST_WORKSPACE.endpoint, ANTHROPIC_AUTH_TOKEN: TOKEN };
+    const MIGRATED_LAYOUT = ["backups", ...LAYOUT];
+
+    /** A throwaway workspace as it was created before the application had a schema: its database holds the pin and nothing else. */
+    function unmigratedWorkspace(): TestWorkspace {
+      const created = createUnmigratedTestWorkspace();
+      workspaces.push(created);
+      return created;
+    }
+
+    /** Looks into the database of a workspace that no server has open. */
+    function inDatabase<Result>(dir: string, look: (db: Database.Database) => Result): Result {
+      const db = new Database(join(dir, "hubber.sqlite"));
+      try {
+        return look(db);
+      } finally {
+        db.close();
+      }
+    }
+    const tablesOf = (dir: string) =>
+      inDatabase(dir, (db) => db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").pluck().all());
+    const copiesIn = (dir: string) => readdirSync(join(dir, "backups")).sort();
+    const modeOf = (path: string) => (statSync(path).mode & 0o777).toString(8);
+
+    it("migrates it at the first start, says so on stderr, keeps a copy, and writes nothing at the second", async () => {
+      const workspace = unmigratedWorkspace();
+      expect(tablesOf(workspace.dir)).toEqual(["workspace_pin"]);
+
+      const first = await launchDev(CREDENTIAL, { workspace });
+      const health = await fetch(`http://${HOST}:${first.port}/api/health`);
+      expect(await health.json()).toEqual({ status: "ok" });
+      expect(await stop(first)).toEqual({ code: 0, signal: null });
+      // The credential that the server was started with is in nothing that this start wrote:
+      // not in the database it migrated, and not in the copy from before.
+      expect(scanWorkspaceForSecret(workspace.dir, TOKEN)).toEqual([]);
+
+      const [copy] = copiesIn(workspace.dir);
+      const copyPath = join(workspace.dir, "backups", copy ?? "");
+      expect(copiesIn(workspace.dir)).toEqual([
+        expect.stringMatching(new RegExp(`^before-${TAGS[0]}-\\d{8}T\\d{9}Z\\.sqlite$`)),
+      ]);
+      // Both lines on stderr, around the work.
+      expect(first.stderr()).toBe(`${NOTICE}Baza zaktualizowana. Kopia sprzed aktualizacji: "${copyPath}".\n`);
+      // The address stays the first line of stdout: whoever reads the output goes by that.
+      expect(first.stdout().split("\n")).toEqual([
+        `API nasłuchuje pod adresem http://${HOST}:${first.port}.`,
+        `Workspace „${TEST_WORKSPACE.name}”: katalog "${workspace.dir}", endpoint ${TEST_WORKSPACE.endpoint}.`,
+        "Poświadczenia: zmienna ANTHROPIC_AUTH_TOKEN.",
+        "Zamykanie serwera…",
+        "",
+      ]);
+      expect(readdirSync(workspace.dir).sort()).toEqual(MIGRATED_LAYOUT);
+      expect([modeOf(join(workspace.dir, "backups")), modeOf(copyPath)]).toEqual(["700", "600"]);
+      expect(inDatabase(workspace.dir, schemaFingerprint)).toBe(MIGRATIONS.at(-1)?.schema);
+      // The copy is the workspace as it was.
+      const copied = new Database(copyPath, { readonly: true });
+      expect(copied.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").pluck().all()).toEqual([
+        "workspace_pin",
+      ]);
+      copied.close();
+
+      const before = { entries: contentsOf(workspace.dir), copies: contentsOf(join(workspace.dir, "backups")) };
+      const second = await launchDev(CREDENTIAL, { workspace });
+      expect(await stop(second)).toEqual({ code: 0, signal: null });
+
+      expect(second.stderr()).toBe("");
+      expect({ entries: contentsOf(workspace.dir), copies: contentsOf(join(workspace.dir, "backups")) }).toEqual(
+        before,
+      );
+    });
+
+    // What Ctrl-C sends, what "kill" sends, and what a terminal sends when it is closed: the
+    // notice promises the first, and the other two must not cut a migration short either.
+    it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+      "finishes the migration when %s arrives in the middle of it, then closes without announcing an address",
+      async (signal) => {
+        const workspace = unmigratedWorkspace();
+        const [port] = await freePorts(1);
+
+        // The first line on stderr is the notice of the migration, printed from inside the opening
+        // of the workspace: the signal is there before the first statement of the migration runs.
+        const server = launch(
+          { HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN, ...CREDENTIAL },
+          { nodeArgs: loading(signalAtFirstErrorLine, { signal }), workspace },
+        );
+
+        expect(await failedStart(server)).toEqual({ code: 0, signal: null });
+        // Migrated, as the two lines say, and not only half-way.
+        const [copy] = copiesIn(workspace.dir);
+        expect(server.stderr()).toBe(
+          `${NOTICE}Baza zaktualizowana. Kopia sprzed aktualizacji: "${join(workspace.dir, "backups", copy ?? "")}".\n`,
+        );
+        expect(inDatabase(workspace.dir, schemaFingerprint)).toBe(MIGRATIONS.at(-1)?.schema);
+        // Shut down in order, with nothing said about an address that is about to go away.
+        expect(server.stdout()).toBe("Zamykanie serwera…\n");
+        expect(await accepts(port)).toBe(false);
+        // One database file: closed, not abandoned.
+        expect(readdirSync(workspace.dir).sort()).toEqual(MIGRATED_LAYOUT);
+        expect(copiesIn(workspace.dir)).toHaveLength(1);
+      },
+    );
+
+    it("does the same when it was started from inside a callback of the event loop", async () => {
+      // An entry point that reads something before it starts the server. The event loop is then in
+      // the middle of handing out what it had found, and a signal that arrives now is not part of
+      // that: it is handed out a round later. The start has to wait for that round too.
+      const entry = join(workDir, "started-from-a-callback.mjs");
+      writeFileSync(
+        entry,
+        `import { readFile } from "node:fs";
+import { takeEnvironment } from ${JSON.stringify(pathToFileURL(SCRUB_ENV).href)};
+import { runServer } from ${JSON.stringify(pathToFileURL(RUN_SERVER).href)};
+const env = takeEnvironment();
+readFile(new URL(import.meta.url), () => void runServer({ env, webRoot: ${JSON.stringify(webRoot)} }));
+`,
+      );
+      const workspace = unmigratedWorkspace();
+      const [port] = await freePorts(1);
+
+      const server = launch(
+        { HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN, ...CREDENTIAL },
+        { script: entry, nodeArgs: loading(signalAtFirstErrorLine, { signal: "SIGTERM" }), workspace },
+      );
+
+      expect(await failedStart(server)).toEqual({ code: 0, signal: null });
+      expect(server.stdout()).toBe("Zamykanie serwera…\n");
+      expect(server.stderr()).toContain("Baza zaktualizowana.");
+      expect(readdirSync(workspace.dir).sort()).toEqual(MIGRATED_LAYOUT);
+    });
+
+    it("opens nothing when a signal arrives before the port is bound", async () => {
+      const workspace = unmigratedWorkspace();
+      const before = contentsOf(workspace.dir);
+      const [port] = await freePorts(1);
+
+      const server = launch(
+        { HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN, ...CREDENTIAL },
+        { nodeArgs: ["--import", pathToFileURL(signalBeforeThePort).href], workspace },
+      );
+
+      expect(await failedStart(server)).toEqual({ code: 0, signal: null });
+      expect(server.stderr()).toBe("Przerwano uruchamianie przed otwarciem workspace'u.\n");
+      expect(server.stdout()).toBe("");
+      expect(await accepts(port)).toBe(false);
+      // Not opened, let alone migrated: the three entries as they were, and no directory for a copy.
+      expect(contentsOf(workspace.dir)).toEqual(before);
+      expect(Object.keys(before)).toEqual(LAYOUT);
+    });
+
+    it("takes back a migration that fails, says why after its notice, and exits with code 1", async () => {
+      const workspace = unmigratedWorkspace();
+      // In the way of the first statement of the first migration: the name of the table that it
+      // creates is taken, by an index on the table of the pin. That table is no part of the schema
+      // which a start compares, so the start gets as far as the migration.
+      const table = /CREATE TABLE (\w+)/.exec(MIGRATIONS[0]?.statements[0] ?? "")?.[1];
+      inDatabase(workspace.dir, (db) => db.exec(`CREATE INDEX ${table} ON workspace_pin (endpoint)`));
+      const tables = tablesOf(workspace.dir);
+      const [port] = await freePorts(1);
+
+      // With the address and the credential, as a start that would go on to serve has them.
+      const server = launch({ HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN, ...CREDENTIAL }, { workspace });
+
+      await expectRefusal(server, port, {
+        code: 1,
+        stderr: `${NOTICE}${refusal(
+          `aktualizacja bazy nie powiodła się w migracji ${TAGS[0]} (polecenie 1: SQLITE_ERROR). Zmiany zostały wycofane i baza jest w stanie sprzed uruchomienia. To błąd tej wersji aplikacji: wróć do poprzedniej wersji kodu albo popraw migrację.`,
+          TEST_WORKSPACE.name,
+        )}`,
+      });
+      expect(tablesOf(workspace.dir)).toEqual(tables);
+      // Nor is the credential in anything that the refused start left behind.
+      expect(scanWorkspaceForSecret(workspace.dir, TOKEN)).toEqual([]);
+      // The directory for the copies was made; the copy went with the migration that was taken back.
+      expect(readdirSync(workspace.dir).sort()).toEqual(MIGRATED_LAYOUT);
+      expect(copiesIn(workspace.dir)).toEqual([]);
+    });
+
+    it("refuses a database whose schema was changed past the migrations, at every start, and leaves it alone", async () => {
+      const workspace = ownWorkspace();
+      const database = join(workspace.dir, "hubber.sqlite");
+      inDatabase(workspace.dir, (db) => {
+        const trigger = db
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name <> 'workspace_pin' LIMIT 1")
+          .pluck()
+          .get();
+        db.exec(`DROP TRIGGER ${trigger}`);
+      });
+      const before = contentsOf(workspace.dir);
+      const [port] = await freePorts(1);
+
+      const server = launch({ HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN }, { workspace });
+
+      await expectRefusal(server, port, {
+        code: 1,
+        stderr: refusal(
+          `schemat bazy "${database}" różni się od tego, który zostawiają migracje tej wersji (ostatnia: ${TAGS.at(-1)}): czegoś w nim brakuje albo coś zmieniono poza aplikacją. Baza nie została zmieniona. Odtwórz cały katalog z kopii zapasowej.`,
+          TEST_WORKSPACE.name,
+        ),
+      });
+      expect(contentsOf(workspace.dir)).toEqual(before);
+    });
+
+    it("refuses a database that was changed past the application before its first migration, and announces no update", async () => {
+      const workspace = unmigratedWorkspace();
+      const database = join(workspace.dir, "hubber.sqlite");
+      inDatabase(workspace.dir, (db) => db.exec("CREATE TABLE notatki_wlasne (x TEXT)"));
+      const before = contentsOf(workspace.dir);
+      const [port] = await freePorts(1);
+
+      const server = launch({ HUBBER_PORT: String(port), HUBBER_DEV_ORIGIN: DEV_ORIGIN }, { workspace });
+
+      // The refusal alone: the notice of an update would be untrue, since none is begun, and the
+      // migration that waits is not blamed for what was in the database before it.
+      await expectRefusal(server, port, {
+        code: 1,
+        stderr: refusal(
+          `baza "${database}" nie przeszła jeszcze żadnej migracji, a są w niej tabele albo inne obiekty, których nie utworzyła aplikacja. Takiej bazy nie da się zaktualizować. Baza nie została zmieniona. Odtwórz cały katalog z kopii zapasowej.`,
+          TEST_WORKSPACE.name,
+        ),
+      });
+      expect(contentsOf(workspace.dir)).toEqual(before);
+      expect(Object.keys(before)).toEqual(LAYOUT);
     });
   });
 

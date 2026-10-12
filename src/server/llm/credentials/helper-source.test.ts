@@ -67,12 +67,13 @@ function isAlive(pid: number): boolean {
 // keeps a login: the process inherits the output of the command and so holds the pipe open.
 // "inside" leaves it in the process group of the command, "outside" in a session of its own, as
 // a daemon does, where a signal to the group does not reach it. The command then prints the
-// token and ends, or stays ("hangs").
+// token and ends, or stays ("hangs"). The file in which it notes that process gets its name only
+// once the number is in it: a test that sees the file may end the command at that moment.
 const LEAVES_A_PROCESS = join(sandbox, "leaves-a-process.mjs");
 writeFileSync(
   LEAVES_A_PROCESS,
   `import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 
 const [pidFile, where, then, token] = process.argv.slice(2);
 const left = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
@@ -80,7 +81,8 @@ const left = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
   stdio: ["ignore", "inherit", "ignore"],
 });
 left.unref();
-writeFileSync(pidFile, String(left.pid));
+writeFileSync(\`\${pidFile}.part\`, String(left.pid));
+renameSync(\`\${pidFile}.part\`, pidFile);
 console.log(token);
 if (then === "hangs") setTimeout(() => {}, 60_000);
 `,
@@ -321,11 +323,15 @@ describe("runHelper", () => {
     );
   });
 
-  it("does not let a command outlive the server process", async () => {
+  // Two processes are started and one of them is ended from outside: with other test files at
+  // work beside this one, that has taken longer than the time a test is given by default.
+  it("does not let a command outlive the server process", { timeout: 20_000 }, async () => {
     const pidFile = join(sandbox, "helper.pid");
     const server = standInServer({
-      // The shell leads the process group of the command; "sleep" is what it started.
-      command: ["/bin/sh", "-c", `echo $$ > "${pidFile}"; sleep 30`],
+      // The shell leads the process group of the command; "sleep" is what it started. The file gets
+      // its name only once the number is in it: the server leaves as soon as it sees the file, and
+      // takes the shell with it, which would otherwise be between creating the file and writing to it.
+      command: ["/bin/sh", "-c", `echo $$ > "${pidFile}.part" && mv "${pidFile}.part" "${pidFile}"; sleep 30`],
       leaveWhenThereIs: pidFile,
     });
 
@@ -336,7 +342,7 @@ describe("runHelper", () => {
 
     expect(code, server.stderr()).toBe(0);
     // The signal was sent as the server left; the system may need a moment to act on it.
-    await vi.waitFor(() => expect(groupIsAlive(group)).toBe(false), { timeout: 3_000, interval: 20 });
+    await vi.waitFor(() => expect(groupIsAlive(group)).toBe(false), { timeout: 10_000, interval: 20 });
   });
 
   it("does not start once the server is shutting down", async () => {

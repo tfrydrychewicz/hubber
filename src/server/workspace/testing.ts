@@ -1,13 +1,14 @@
 // Throwaway workspaces and the search for a planted secret. For tests and for the end-to-end
 // run only: the application never imports this file.
-import { mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { TEST_WORKSPACE } from "../testing.ts";
 import type { LlmProfile } from "./config.ts";
 import { createWorkspace } from "./create.ts";
-import { DATABASE_FILE } from "./layout.ts";
+import { createWorkspaceDatabase } from "./database.ts";
+import { BACKUPS_DIR, DATABASE_FILE } from "./layout.ts";
 import { WORKSPACE_VARIABLE } from "./location.ts";
 
 export const TEST_PROFILE: LlmProfile = {
@@ -35,11 +36,25 @@ export interface TestWorkspace {
   remove: () => void;
 }
 
-/** A throwaway workspace in a temporary directory of its own. The caller removes it. */
+/** A throwaway workspace in a temporary directory of its own, at the schema of this code. The caller removes it. */
 export function createTestWorkspace(profile: Partial<LlmProfile> = {}): TestWorkspace {
   const base = mkdtempSync(join(tmpdir(), "hubber-workspace-"));
   const dir = join(base, "workspace");
   createTestWorkspaceAt(dir, profile);
+  return { dir, env: { [WORKSPACE_VARIABLE]: dir }, remove: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+/**
+ * A throwaway workspace as it was created before the application had a schema: its database
+ * holds the pin and nothing else, so the first open of it migrates. For the tests of that start.
+ */
+export function createUnmigratedTestWorkspace(profile: Partial<LlmProfile> = {}): TestWorkspace {
+  const base = mkdtempSync(join(tmpdir(), "hubber-workspace-"));
+  const dir = join(base, "workspace");
+  createWorkspace(
+    { dir, name: TEST_WORKSPACE.name, profile: { ...TEST_PROFILE, ...profile } },
+    { createDatabase: createWorkspaceDatabase },
+  );
   return { dir, env: { [WORKSPACE_VARIABLE]: dir }, remove: () => rmSync(base, { recursive: true, force: true }) };
 }
 
@@ -91,10 +106,18 @@ function entriesUnder(root: string): Entry[] {
  * enough alone: the bytes of every file (configuration, write-ahead log, dropped files); what
  * every file, directory and link is called and where a link leads, since a name is kept by the
  * directory and is in no file; and every value of every table read through SQL, the schema
- * included, which sees a value that SQLite split across pages. Not looked at: extended attributes.
+ * included, which sees a value that SQLite split across pages. The copies of the database from
+ * before a migration are whole databases, and are read through SQL like the database itself.
+ * Not looked at: extended attributes.
  */
 export function scanWorkspaceForSecret(dir: string, secret: string): SecretFinding[] {
-  const database = join(dir, DATABASE_FILE);
+  const backups = join(dir, BACKUPS_DIR);
+  const databases = [
+    join(dir, DATABASE_FILE),
+    ...(existsSync(backups) ? readdirSync(backups).sort() : [])
+      .filter((name) => name.endsWith(".sqlite"))
+      .map((name) => join(backups, name)),
+  ];
   const spellings = spellingsOf(secret);
   const findings: SecretFinding[] = [];
   for (const { path, name, kind } of entriesUnder(dir)) {
@@ -107,31 +130,33 @@ export function scanWorkspaceForSecret(dir: string, secret: string): SecretFindi
       }
     }
   }
-  // Not through openWorkspaceDatabase(): a scan must work on a database that fails its checks too.
-  // Not with the "readonly" option either: such a connection leaves -shm and -wal files beside a
-  // database that was closed, and a scan must leave the directory as it found it. An ordinary
-  // connection removes them when it closes, and query_only keeps it from writing.
-  const db = new Database(database, { fileMustExist: true });
-  try {
-    db.pragma("query_only = ON");
-    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").pluck().all() as string[];
-    // The schema is a table too: the names of tables and columns and the defaults are its values.
-    for (const table of ["sqlite_schema", ...tables]) {
-      for (const row of db.prepare(`SELECT * FROM "${table.replaceAll('"', '""')}"`).iterate() as Iterable<
-        Record<string, unknown>
-      >) {
-        for (const [column, value] of Object.entries(row)) {
-          const bytes =
-            typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.isBuffer(value) ? value : undefined;
-          if (bytes === undefined) continue;
-          for (const { name, bytes: needle } of spellings) {
-            if (bytes.includes(needle)) findings.push({ where: `${database}: ${table}.${column}`, spelling: name });
+  for (const database of databases) {
+    // Not through openWorkspaceDatabase(): a scan must work on a database that fails its checks too.
+    // Not with the "readonly" option either: such a connection leaves -shm and -wal files beside a
+    // database that was closed, and a scan must leave the directory as it found it. An ordinary
+    // connection removes them when it closes, and query_only keeps it from writing.
+    const db = new Database(database, { fileMustExist: true });
+    try {
+      db.pragma("query_only = ON");
+      const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").pluck().all() as string[];
+      // The schema is a table too: the names of tables and columns and the defaults are its values.
+      for (const table of ["sqlite_schema", ...tables]) {
+        for (const row of db.prepare(`SELECT * FROM "${table.replaceAll('"', '""')}"`).iterate() as Iterable<
+          Record<string, unknown>
+        >) {
+          for (const [column, value] of Object.entries(row)) {
+            const bytes =
+              typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.isBuffer(value) ? value : undefined;
+            if (bytes === undefined) continue;
+            for (const { name, bytes: needle } of spellings) {
+              if (bytes.includes(needle)) findings.push({ where: `${database}: ${table}.${column}`, spelling: name });
+            }
           }
         }
       }
+    } finally {
+      db.close();
     }
-  } finally {
-    db.close();
   }
   return findings;
 }

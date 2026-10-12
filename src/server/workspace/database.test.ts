@@ -9,6 +9,7 @@ import {
   createWorkspaceDatabase,
   openWorkspaceDatabase,
   readWorkspacePin,
+  snapshotWorkspaceDatabase,
   WORKSPACE_FORMAT,
   type WorkspaceDatabase,
   WorkspaceDatabaseError,
@@ -20,7 +21,64 @@ import { DATABASE_FILE } from "./layout.ts";
 // stays in. Everything else goes to the real library.
 // It also keeps what every connection was asked to set: a setting of the connection that
 // creates the database is gone with that connection, and cannot be read from the file afterwards.
-const disk = vi.hoisted(() => ({ refusesWal: false, pragmas: [] as string[] }));
+// And it keeps what the module asked the system to write to the drive, to name and to remove, in
+// order: whether a file reached the drive before it got its name cannot be read from the directory.
+// With a path to watch, each step is kept with the size that file had just before it, "absent"
+// for a file that was not there: what stood under a name at a moment that is over cannot be read
+// afterwards either. And a file system without hard links is not at hand: with a code set here, the
+// system refuses every link with it, the way exFAT does with ENOTSUP. Nor is a drive that fails at
+// one moment: with a path set here, the system refuses to write that file or directory to the drive.
+const disk = vi.hoisted(() => ({
+  refusesWal: false,
+  linkFailsWith: undefined as string | undefined,
+  syncFailsFor: undefined as string | undefined,
+  pragmas: [] as string[],
+  steps: [] as string[],
+  watched: undefined as string | undefined,
+}));
+vi.mock("node:fs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs")>();
+  const opened = new Map<number, string>();
+  const note = (step: string) => {
+    const size =
+      disk.watched === undefined
+        ? undefined
+        : (real.statSync(disk.watched, { throwIfNoEntry: false })?.size ?? "absent");
+    disk.steps.push(size === undefined ? step : `${step} [${size}]`);
+  };
+  return {
+    ...real,
+    openSync: (...args: Parameters<typeof real.openSync>) => {
+      const descriptor = real.openSync(...args);
+      opened.set(descriptor, String(args[0]));
+      return descriptor;
+    },
+    fsyncSync: (descriptor: number) => {
+      note(`sync ${opened.get(descriptor)}`);
+      if (opened.get(descriptor) === disk.syncFailsFor) {
+        throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" });
+      }
+      real.fsyncSync(descriptor);
+    },
+    renameSync: (from: string, to: string) => {
+      note(`rename ${from} to ${to}`);
+      real.renameSync(from, to);
+    },
+    linkSync: (from: string, to: string) => {
+      note(`link ${from} to ${to}`);
+      if (disk.linkFailsWith !== undefined) {
+        throw Object.assign(new Error(`${disk.linkFailsWith}: link '${from}' -> '${to}'`), {
+          code: disk.linkFailsWith,
+        });
+      }
+      real.linkSync(from, to);
+    },
+    rmSync: (...args: Parameters<typeof real.rmSync>) => {
+      note(`remove ${args[0]}`);
+      real.rmSync(...args);
+    },
+  };
+});
 vi.mock("better-sqlite3", async (importOriginal) => {
   const { default: Real } = await importOriginal<{ default: typeof Database }>();
   return {
@@ -45,10 +103,15 @@ const startUmask = process.umask();
 
 afterEach(() => {
   disk.refusesWal = false;
+  disk.linkFailsWith = undefined;
+  disk.syncFailsFor = undefined;
+  disk.watched = undefined;
   disk.pragmas.length = 0;
   process.umask(startUmask);
   for (const db of connections.splice(0)) if (db.open) db.close();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // Last: the tidying above is kept as steps too.
+  disk.steps.length = 0;
 });
 
 /** The path of a database file in a directory of its own, where nothing exists yet. */
@@ -143,6 +206,8 @@ describe("createWorkspaceDatabase", () => {
       "synchronous = FULL",
       "fullfsync = ON",
       "checkpoint_fullfsync = ON",
+      // Also before the first write: what the creating connection deletes must not stay readable either.
+      "secure_delete = ON",
     ]);
   });
 
@@ -223,6 +288,33 @@ describe("openWorkspaceDatabase", () => {
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
     expect(db.pragma("busy_timeout", { simple: true })).toBe(5000);
     expect(db.readonly).toBe(false);
+  });
+
+  it("writes zeros over what is deleted, so that a deleted text is not left in the file", () => {
+    // A text long enough to be found, short enough to stay inside one page of the table.
+    const text = "usunięta-wrzutka-".repeat(20);
+    const write = (db: Database.Database) => {
+      db.exec("CREATE TABLE drops (id INTEGER PRIMARY KEY, body TEXT NOT NULL) STRICT");
+      db.prepare("INSERT INTO drops (body) VALUES (?)").run(text);
+      // Folded into the file first: the row is then deleted from the file itself, not from the log.
+      db.pragma("wal_checkpoint(TRUNCATE)");
+      db.exec("DELETE FROM drops");
+      db.close();
+    };
+    // The control: a connection left to itself only marks the space of the row as free.
+    const plainPath = created();
+    const plain = raw(plainPath);
+    expect(plain.pragma("secure_delete", { simple: true })).toBe(0);
+    write(plain);
+    expect(readFileSync(plainPath).includes(text)).toBe(true);
+
+    const path = created();
+    const db = opened(path);
+    expect(db.pragma("secure_delete", { simple: true })).toBe(1);
+    write(db);
+
+    expect(readFileSync(path).includes(text)).toBe(false);
+    expect(entries(path)).toEqual([DATABASE_FILE]);
   });
 
   it("enforces foreign keys on the connection it hands out", () => {
@@ -452,5 +544,231 @@ describe("what lies beside the database file", () => {
     // Why a copy of the database file alone, taken while the app runs, is no backup.
     expect(readFileSync(path).includes("tylko-w-dzienniku")).toBe(false);
     expect(readFileSync(`${path}-wal`).includes("tylko-w-dzienniku")).toBe(true);
+  });
+});
+
+describe("snapshotWorkspaceDatabase", () => {
+  /** A database with a row that only its write-ahead log holds, and the place for a copy beside it. */
+  function withUnfoldedRow(): { db: WorkspaceDatabase; path: string; target: string } {
+    const path = created();
+    const db = opened(path);
+    db.exec("CREATE TABLE drops (body TEXT NOT NULL) STRICT; INSERT INTO drops VALUES ('tylko-w-dzienniku')");
+    return { db, path, target: join(dirname(path), "kopia.sqlite") };
+  }
+
+  it("writes the whole database into one new file, what only the log holds included", () => {
+    const { db, path, target } = withUnfoldedRow();
+    expect(readFileSync(path).includes("tylko-w-dzienniku")).toBe(false);
+
+    snapshotWorkspaceDatabase(db, target);
+
+    // Nothing of the making is left: no partial file and no journal of the copy.
+    expect(entries(path)).toEqual([DATABASE_FILE, ...SIDE_FILES, "kopia.sqlite"].sort());
+    const copy = raw(target, { readonly: true });
+    expect(copy.prepare("SELECT body FROM drops").pluck().all()).toEqual(["tylko-w-dzienniku"]);
+    expect(copy.prepare("SELECT endpoint, created_at AS createdAt FROM workspace_pin").get()).toEqual({
+      endpoint: ROUTER,
+      createdAt: CREATED_AT,
+    });
+    expect(copy.pragma("application_id", { simple: true })).toBe(APPLICATION_ID);
+    expect(copy.pragma("user_version", { simple: true })).toBe(WORKSPACE_FORMAT);
+    expect(copy.pragma("integrity_check", { simple: true })).toBe("ok");
+  });
+
+  it("makes the copy private whatever the shell would let others read", () => {
+    process.umask(0o022);
+    const { db, target } = withUnfoldedRow();
+
+    snapshotWorkspaceDatabase(db, target);
+
+    expect(mode(target)).toBe("600");
+  });
+
+  it("gives the copy its name only once the drive has it, and then has the drive keep the name", () => {
+    const { db, path, target } = withUnfoldedRow();
+    disk.steps.length = 0;
+
+    snapshotWorkspaceDatabase(db, target);
+
+    // A power cut leaves either no copy of that name or a whole one. The name is a second name
+    // for the finished file, and the first one is taken away afterwards.
+    expect(disk.steps).toEqual([
+      `sync ${target}.partial`,
+      `link ${target}.partial to ${target}`,
+      `remove ${target}.partial`,
+      `sync ${dirname(path)}`,
+    ]);
+  });
+
+  it("never lets the name of the copy stand for less than the whole copy, not even for a moment", () => {
+    const { db, target } = withUnfoldedRow();
+    disk.steps.length = 0;
+    disk.watched = target;
+
+    snapshotWorkspaceDatabase(db, target);
+
+    // What was under the name just before each step: nothing until the copy was whole and on the
+    // drive, and all of it from then on. A process killed at any point leaves no empty file there.
+    const whole = statSync(target).size;
+    expect(whole).toBeGreaterThan(0);
+    expect(disk.steps.map((step) => step.replace(/^(\w+) .* \[(.+)\]$/, "$1: $2"))).toEqual([
+      "sync: absent",
+      "link: absent",
+      `remove: ${whole}`,
+      `sync: ${whole}`,
+    ]);
+  });
+
+  describe("where the system refuses the link", () => {
+    // What macOS and Linux answer for a link on exFAT or FAT, which have no hard links, and what
+    // another file system may answer, a network share or a folder that a program keeps in step
+    // with a server: the copy is made wherever a file can be created and renamed.
+    it.each(["ENOTSUP", "EPERM", "ENOSYS", "EOPNOTSUPP", "EACCES", "EMLINK", "EIO"])(
+      "takes the name first and moves the copy over it, whole and private (%s)",
+      (code) => {
+        process.umask(0o022);
+        const { db, path, target } = withUnfoldedRow();
+        disk.linkFailsWith = code;
+        disk.steps.length = 0;
+
+        snapshotWorkspaceDatabase(db, target);
+
+        expect(disk.steps).toEqual([
+          `sync ${target}.partial`,
+          `link ${target}.partial to ${target}`,
+          `rename ${target}.partial to ${target}`,
+          `sync ${dirname(path)}`,
+        ]);
+        expect(entries(path)).toEqual([DATABASE_FILE, ...SIDE_FILES, "kopia.sqlite"].sort());
+        expect(mode(target)).toBe("600");
+        const copy = raw(target, { readonly: true });
+        expect(copy.prepare("SELECT body FROM drops").pluck().all()).toEqual(["tylko-w-dzienniku"]);
+        expect(copy.pragma("integrity_check", { simple: true })).toBe("ok");
+      },
+    );
+
+    it("never writes over a copy that is already there either", () => {
+      const { db, path, target } = withUnfoldedRow();
+      disk.linkFailsWith = "ENOTSUP";
+      writeFileSync(target, "an earlier copy");
+      const before = entries(path);
+
+      expect(() => snapshotWorkspaceDatabase(db, target)).toThrow(/EEXIST/);
+
+      expect(readFileSync(target, "utf8")).toBe("an earlier copy");
+      expect(entries(path)).toEqual(before);
+    });
+  });
+
+  it("does not try the other way for a name that the link found taken: that is passed on, and nothing is left behind", () => {
+    const { db, path, target } = withUnfoldedRow();
+    // As the link saw it. Whatever had the name is somebody else's, also when it is gone a moment later.
+    disk.linkFailsWith = "EEXIST";
+    const before = entries(path);
+
+    expect(() => snapshotWorkspaceDatabase(db, target)).toThrow(/EEXIST/);
+
+    expect(entries(path)).toEqual(before);
+  });
+
+  // The last step, after the copy has its name: the directory that holds the name goes to the drive.
+  it.each([
+    ["by a link", undefined],
+    ["by a move over an empty file", "ENOTSUP"],
+  ])("removes the copy again when a later step fails, also once it has got its name %s", (_how, linkFailsWith) => {
+    const { db, path, target } = withUnfoldedRow();
+    disk.linkFailsWith = linkFailsWith;
+    disk.syncFailsFor = dirname(target);
+    disk.steps.length = 0;
+    const before = entries(path);
+
+    expect(() => snapshotWorkspaceDatabase(db, target)).toThrow(/EIO/);
+
+    // The control: the copy had its name when the step failed.
+    expect(disk.steps.slice(0, 3)).toEqual([
+      `sync ${target}.partial`,
+      `link ${target}.partial to ${target}`,
+      linkFailsWith === undefined ? `remove ${target}.partial` : `rename ${target}.partial to ${target}`,
+    ]);
+    expect(entries(path)).toEqual(before);
+  });
+
+  it("makes a copy that is one file without a log, so it opens from its bytes alone", () => {
+    const { db, target } = withUnfoldedRow();
+
+    snapshotWorkspaceDatabase(db, target);
+
+    const onDisk = raw(target, { readonly: true });
+    expect(onDisk.pragma("journal_mode", { simple: true })).toBe("delete");
+    const fromBytes = new Database(readFileSync(target));
+    connections.push(fromBytes);
+    expect(fromBytes.prepare("SELECT body FROM drops").pluck().all()).toEqual(["tylko-w-dzienniku"]);
+  });
+
+  it("leaves the database it copies as it was", () => {
+    const { db, path, target } = withUnfoldedRow();
+    const watching = raw(path);
+    const version = watching.pragma("data_version", { simple: true });
+    const before = [digest(path), digest(`${path}-wal`)];
+
+    snapshotWorkspaceDatabase(db, target);
+
+    expect([digest(path), digest(`${path}-wal`)]).toEqual(before);
+    expect(watching.pragma("data_version", { simple: true })).toBe(version);
+  });
+
+  it("can be opened as the database of the workspace once it is put in its place", () => {
+    const { db, target } = withUnfoldedRow();
+    snapshotWorkspaceDatabase(db, target);
+
+    const restored = opened(target);
+
+    expect(restored.pragma("journal_mode", { simple: true })).toBe("wal");
+    expect(restored.prepare("SELECT body FROM drops").pluck().all()).toEqual(["tylko-w-dzienniku"]);
+  });
+
+  it("never writes over a copy that is already there, and leaves nothing of its own beside it", () => {
+    const { db, path, target } = withUnfoldedRow();
+    writeFileSync(target, "an earlier copy");
+    const before = entries(path);
+
+    expect(() => snapshotWorkspaceDatabase(db, target)).toThrow(/EEXIST/);
+
+    expect(readFileSync(target, "utf8")).toBe("an earlier copy");
+    expect(entries(path)).toEqual(before);
+  });
+
+  it("leaves alone a partial file of that name, which is somebody else's copy in the making", () => {
+    const { db, path, target } = withUnfoldedRow();
+    writeFileSync(`${target}.partial`, "half a copy");
+    const before = entries(path);
+
+    expect(() => snapshotWorkspaceDatabase(db, target)).toThrow(/EEXIST/);
+
+    expect(readFileSync(`${target}.partial`, "utf8")).toBe("half a copy");
+    expect(entries(path)).toEqual(before);
+  });
+
+  it("removes what it began when SQLite refuses to write the copy", () => {
+    const { db, path, target } = withUnfoldedRow();
+    const before = entries(path);
+    db.exec("BEGIN");
+
+    // Passed on as SQLite said it: the caller knows what the copy was for.
+    expect(() => snapshotWorkspaceDatabase(db, target)).toThrow("cannot VACUUM from within a transaction");
+
+    db.exec("ROLLBACK");
+    expect(entries(path)).toEqual(before);
+  });
+
+  it("passes on what the system says when there is no directory for the copy", () => {
+    const { db, path } = withUnfoldedRow();
+    const before = entries(path);
+
+    expect(() => snapshotWorkspaceDatabase(db, join(dirname(path), "no-such-directory", "kopia.sqlite"))).toThrow(
+      /ENOENT/,
+    );
+
+    expect(entries(path)).toEqual(before);
   });
 });

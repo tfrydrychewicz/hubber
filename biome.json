@@ -49,6 +49,9 @@
       "correctness": {
         "useImportExtensions": "error"
       },
+      "nursery": {
+        "noFloatingPromises": "error"
+      },
       "style": {
         "noUnusedTemplateLiteral": "error"
       }
@@ -125,8 +128,38 @@
                   {
                     "group": ["**/server/**"],
                     "message": "The web app talks to the server over /api only."
+                  },
+                  {
+                    "group": ["drizzle-orm", "drizzle-orm/**"],
+                    "message": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
-                ]
+                ],
+                "paths": {
+                  "better-sqlite3": "The database is the server's: the web app talks to the server over /api only.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/sqlite-core": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/driver": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/session": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/migrator": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/migrator": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema."
+                }
               }
             }
           }
@@ -149,6 +182,18 @@
                   {
                     "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
                     "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
@@ -164,7 +209,20 @@
                   "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -188,12 +246,37 @@
                   {
                     "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
                     "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
                   "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
                   "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -217,6 +300,18 @@
                   {
                     "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
                     "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
@@ -231,7 +326,88 @@
                   "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
-                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/server/db/handle.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["**/web/**"],
+                    "message": "The server must not import browser code."
+                  },
+                  {
+                    "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
+                    "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": [
+                      "drizzle-orm/**",
+                      "!drizzle-orm/sqlite-core",
+                      "!drizzle-orm/sqlite-core/**",
+                      "!drizzle-orm/better-sqlite3"
+                    ],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
+                  }
+                ],
+                "paths": {
+                  "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
+                  "@anthropic-ai/sdk": {
+                    "importNames": ["default", "Anthropic", "BaseAnthropic", "*"],
+                    "message": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name."
+                  },
+                  "@anthropic-ai/sdk/client": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/client.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -275,6 +451,18 @@
                   {
                     "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
                     "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
@@ -290,7 +478,20 @@
                   "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -310,12 +511,37 @@
                   {
                     "group": ["**/testing.ts", "**/*.test.ts", "**/egress-observer.ts"],
                     "message": "Tests and their helpers are for tests. They may use what application code may not: fetch, an SDK client of their own, the database library."
+                  },
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
                   "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
                   "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -331,6 +557,20 @@
             "noRestrictedImports": {
               "level": "error",
               "options": {
+                "patterns": [
+                  {
+                    "group": ["drizzle-orm/**", "!drizzle-orm/sqlite-core", "!drizzle-orm/sqlite-core/**"],
+                    "message": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
+                  }
+                ],
                 "paths": {
                   "node:sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
                   "sqlite": "One SQLite library per process: the database is opened by src/server/workspace/database.ts, with better-sqlite3.",
@@ -344,7 +584,20 @@
                   "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm/better-sqlite3": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/driver": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/session": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/better-sqlite3/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator.",
+                  "drizzle-orm/migrator": "Drizzle's driver is imported in one place, src/server/db/handle.ts, and only as drizzle-orm/better-sqlite3: given a path, the driver opens a database file by itself, past the pin check. Take Db and createDb() from that file, tables from drizzle-orm/sqlite-core and query helpers from drizzle-orm. Migrations are applied by src/server/db/migrate.ts, not by Drizzle's migrator."
                 }
               }
             }
@@ -398,6 +651,26 @@
       }
     },
     {
+      "includes": ["**", "!src/server/**", "!scripts/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noFloatingPromises": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["**/*.test.ts", "src/server/**/testing.ts"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noFloatingPromises": "off"
+          }
+        }
+      }
+    },
+    {
       "includes": ["src/shared/**"],
       "linter": {
         "rules": {
@@ -409,6 +682,18 @@
                   {
                     "group": ["**/server/**", "**/web/**"],
                     "message": "src/shared is imported by both sides and must not depend on either."
+                  },
+                  {
+                    "group": ["drizzle-orm", "drizzle-orm/**"],
+                    "message": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema."
+                  },
+                  {
+                    "group": ["better-sqlite3/**"],
+                    "message": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check."
+                  },
+                  {
+                    "group": ["**/node_modules/**"],
+                    "message": "Import a package by its name: a path into node_modules leads past the rules that keep the database library, Drizzle's driver and the SDK client to one place each."
                   }
                 ],
                 "paths": {
@@ -424,7 +709,22 @@
                   "@anthropic-ai/sdk/index": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.js": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
                   "@anthropic-ai/sdk/index.mjs": "Only src/server/llm/client.ts builds an SDK client: it binds the client to the workspace's endpoint and credential. Types and error classes can be imported by name.",
-                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there."
+                  "better-sqlite3": "Only src/server/workspace/database.ts opens the database: it checks the endpoint pin first. Take the WorkspaceDatabase type from there.",
+                  "better-sqlite3/linux-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linux-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/linuxmusl-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/darwin-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-x64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "better-sqlite3/win32-arm64": "The database library is imported in one place, src/server/workspace/database.ts, and only as better-sqlite3: an entry of the package for a single platform, such as better-sqlite3/darwin-arm64, gives a Database constructor of its own, which opens a database file past the pin check.",
+                  "drizzle-orm": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/sqlite-core": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/driver": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/session": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/better-sqlite3/migrator": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema.",
+                  "drizzle-orm/migrator": "The database is the server's: the web app and the code it shares with the server import nothing of Drizzle. Tables are declared in src/server/db/schema."
                 }
               }
             }

@@ -1,10 +1,11 @@
-// The SQLite file of a workspace: how it is created, how it is opened, and the endpoint pin it
-// carries. No ORM here: Drizzle goes on top of the connection that openWorkspaceDatabase()
-// returns, and never declares workspace_pin in its schema.
+// The SQLite file of a workspace: how it is created, how it is opened, how a copy of it is made,
+// and the endpoint pin it carries. No ORM here: Drizzle goes on top of the connection that
+// openWorkspaceDatabase() returns, and never declares workspace_pin in its schema.
 //
 // The only module that imports better-sqlite3 (lint): nobody gets a connection to a workspace
 // database without the checks below.
-import { closeSync, openSync, rmSync } from "node:fs";
+import { closeSync, fsyncSync, linkSync, openSync, renameSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { PRIVATE_FILE_MODE } from "./layout.ts";
 
@@ -110,6 +111,17 @@ function waitForTheDrive(db: WorkspaceDatabase): void {
   db.pragma("checkpoint_fullfsync = ON");
 }
 
+/**
+ * Has SQLite write zeros over what it deletes. Left to itself it only marks the space as free, and
+ * the text of a deleted row stays readable in the file, and in every copy of the file, until
+ * something else happens to be written there: a capture that the owner removed for good would still
+ * be on the disk. A setting of a connection, like the three above, so every connection gets it
+ * before its first write.
+ */
+function eraseWhatIsDeleted(db: WorkspaceDatabase): void {
+  db.pragma("secure_delete = ON");
+}
+
 function isSqliteError(error: unknown, ...codes: string[]): error is InstanceType<typeof Database.SqliteError> {
   return (
     error instanceof Database.SqliteError && (codes.length === 0 || codes.some((code) => error.code.startsWith(code)))
@@ -140,6 +152,7 @@ export function createWorkspaceDatabase(path: string, pin: WorkspacePin): void {
         throw new WorkspaceDatabaseError("wal-unavailable", path);
       }
       waitForTheDrive(db);
+      eraseWhatIsDeleted(db);
       // The header fields and the pin land together or not at all.
       db.transaction(() => {
         db.pragma(`application_id = ${APPLICATION_ID}`);
@@ -214,6 +227,7 @@ export function openWorkspaceDatabase(path: string, expectedEndpoint: string): W
     // Per connection, so set at every open.
     db.pragma("foreign_keys = ON");
     waitForTheDrive(db);
+    eraseWhatIsDeleted(db);
     // A file restored from a VACUUM INTO snapshot is not in WAL mode.
     if (db.pragma("journal_mode", { simple: true }) !== "wal") db.pragma("journal_mode = WAL");
     return db;
@@ -227,4 +241,72 @@ export function openWorkspaceDatabase(path: string, expectedEndpoint: string): W
 /** The pin as stored. */
 export function readWorkspacePin(db: WorkspaceDatabase): WorkspacePin {
   return db.prepare("SELECT endpoint, created_at AS createdAt FROM workspace_pin WHERE id = 1").get() as WorkspacePin;
+}
+
+/** Makes the drive write a file, or the entries of a directory, before the call returns. */
+function syncToDisk(path: string): void {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/**
+ * Writes the whole database, as this connection sees it now, into a new file at `target`: one
+ * file that is complete without a write-ahead log, and private from its first byte. VACUUM INTO
+ * and not a copy of the file: in WAL mode a part of the database is in the log beside it.
+ *
+ * The copy appears under its name only when it is whole and on the disk; until then it is
+ * "<target>.partial". (Where the system refuses a hard link, as on a file system that has none,
+ * the name is first taken by an empty file, for a moment.) Nothing is written over: a target or a
+ * partial file that is already there is an error, and it is left as it is. On a failure the files
+ * this call created are removed again, and the error is what SQLite or the system reported.
+ *
+ * Not for a connection inside a transaction: SQLite refuses VACUUM there. The copy is not in WAL
+ * mode; openWorkspaceDatabase() switches it back on for a copy that was put in the database's place.
+ */
+export function snapshotWorkspaceDatabase(db: WorkspaceDatabase, target: string): void {
+  const partial = `${target}.partial`;
+  // Created here and not by SQLite, like the database itself: "wx" fails on a name that is taken,
+  // and the mode keeps the copy private. VACUUM INTO accepts a file that exists while it is empty.
+  closeSync(openSync(partial, "wx", PRIVATE_FILE_MODE));
+  let targetIsOurs = false;
+  try {
+    db.prepare("VACUUM INTO ?").run(partial);
+    syncToDisk(partial);
+    // The name of the copy is given to the finished file as a second name, and the first one is
+    // then taken away. A link fails on a name that is taken, so nothing is written over, and a
+    // process that is killed here leaves the whole copy under that name or no file at all: never
+    // an empty one, which a rename over a name taken beforehand would leave.
+    let linked = true;
+    try {
+      linkSync(partial, target);
+    } catch (error) {
+      // A name that is taken is the one refusal that is final. Any other is taken for a place
+      // where a file cannot be given a second name: exFAT and FAT answer ENOTSUP on macOS and
+      // EPERM on Linux, and a network share or a folder that a program keeps in step with a
+      // server may answer with a code of its own. The copy is still made there, the other way.
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw error;
+      linked = false;
+    }
+    if (linked) {
+      targetIsOurs = true;
+      rmSync(partial);
+    } else {
+      // The name is taken first, by an empty file, and the copy is moved over it: between the two
+      // the name stands for nothing, which is the price where there are no hard links. A name
+      // that is taken is refused here as well, and whatever else is wrong shows in these calls.
+      closeSync(openSync(target, "wx", PRIVATE_FILE_MODE));
+      targetIsOurs = true;
+      renameSync(partial, target);
+    }
+    syncToDisk(dirname(target));
+  } catch (error) {
+    // VACUUM INTO keeps a rollback journal beside the file it writes for as long as it writes.
+    const created = [partial, `${partial}-journal`, ...(targetIsOurs ? [target] : [])];
+    for (const path of created) rmSync(path, { force: true });
+    throw error;
+  }
 }
